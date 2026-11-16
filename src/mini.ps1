@@ -37,13 +37,13 @@ function Get-MiniEntries([object[]]$rows,[string[]]$previous=@()) {
     # Second pass keeps malformed cyclic relations visible without recursion or duplicates.
     foreach($root in @($roots)+@($ordered)){
         if($seen.ContainsKey([string]$root.id)){continue}
-        $stack.Push(@{Row=$root;Depth=0})
+        $stack.Push(@{Row=$root;Depth=0;VisibleParentId=''})
         while($stack.Count){
             $entry=$stack.Pop();$row=$entry.Row;$id=[string]$row.id
             if($seen.ContainsKey($id)){continue};$seen[$id]=$true
             $entry
             $list=$children[$id]
-            if($list){for($i=$list.Count-1;$i -ge 0;$i--){$stack.Push(@{Row=$list[$i];Depth=$entry.Depth+1})}}
+            if($list){for($i=$list.Count-1;$i -ge 0;$i--){$stack.Push(@{Row=$list[$i];Depth=$entry.Depth+1;VisibleParentId=$id})}}
         }
     }
 }
@@ -63,6 +63,8 @@ function Get-MiniScale([object[]]$entries) {
 function Get-MiniDisplayRows([object[]]$entries,[bool]$fresh,[double]$scale) {
     foreach($entry in $entries){
         $row=$entry.Row;$child=($row.parent_id -or $row.source -eq 'subagent')
+        # A relationship in the data is not a visible tree edge when its parent is filtered out.
+        $nested=([int]$entry.Depth -gt 0 -and $entry.VisibleParentId -and [string]$entry.VisibleParentId -ceq [string]$row.parent_id)
         $title=Clean-Title $row.title;if(-not $title){$title=[string]$row.id}
         $model=if($row.model -and $row.model -ne 'unknown'){$row.model}else{'模型未记录'}
         $subtitle=$(if($child){'子会话 · '}else{''})+$model+' · '+(Format-Effort $row.effort)
@@ -81,8 +83,16 @@ function Get-MiniDisplayRows([object[]]$entries,[bool]$fresh,[double]$scale) {
         if(-not $fresh){$state+=' · 数据待更新'}
         if($mark){$rate=''}
         $tooltip=$title+$miniNewLine+$subtitle+$miniNewLine+$state+' · 近 1 分钟 '+$rate+' tok/s'+$miniNewLine+'每行仅计自身输出，包含推理 token；响应结束后入账。'
-        if($child -and $speedRows.ContainsKey([string]$row.parent_id)){$tooltip+=$miniNewLine+'父会话：'+(Clean-Title $speedRows[[string]$row.parent_id].title)}
-        $item=@{Id=[string]$row.id;Title=$title;Subtitle=$subtitle;Rate=$rate;RateTone=$(if($fresh){(Theme-Color 'TextPrimary')}else{(Theme-Color 'TextMuted')});Tone=$(if($fresh -and $row.available){(Theme-Color 'Accent')}else{(Theme-Color 'TextMuted')});Branch=$(if($child){'└'}else{''});Indent=((8+20*$(if($child){[Math]::Min(2,[Math]::Max(1,[int]$entry.Depth))}else{0}))).ToString()+',0,0,0';Tooltip=$tooltip;Accessible=$title+'，'+$state+'，'+$rate+' token 每秒';ChartOpacity=$(if($fresh -and $row.available){'1'}else{'0.3'});ChartLabel='近 5 分钟输出速率，每柱 30 秒，共用刻度 0 至 '+($scale.ToString('0.###',[Globalization.CultureInfo]::InvariantCulture))+' token 每秒'}
+        $parentTitle=''
+        if($row.parent_id){
+            $parentId=[string]$row.parent_id
+            if($speedRows.ContainsKey($parentId)){$parentTitle=Clean-Title $speedRows[$parentId].title}
+            elseif($script:sessions -and $script:sessions.ContainsKey($parentId)){$parentTitle=Clean-Title $script:sessions[$parentId].title}
+            if(-not $parentTitle){$parentTitle=$parentId}
+            $tooltip+=$miniNewLine+'父会话：'+$parentTitle
+            if(-not $nested){$tooltip+=$miniNewLine+'父会话当前未在小窗显示'}
+        }
+        $item=@{Id=[string]$row.id;Title=$title;Subtitle=$subtitle;Rate=$rate;RateTone=$(if($fresh){(Theme-Color 'TextPrimary')}else{(Theme-Color 'TextMuted')});Tone=$(if($fresh -and $row.available){(Theme-Color 'Accent')}else{(Theme-Color 'TextMuted')});Branch=$(if($nested){'└'}else{''});Indent=((8+20*$(if($nested){[Math]::Min(2,[int]$entry.Depth)}else{0}))).ToString()+',0,0,0';Tooltip=$tooltip;Accessible=$title+'，'+$state+'，'+$rate+' token 每秒';ChartOpacity=$(if($fresh -and $row.available){'1'}else{'0.3'});ChartLabel='近 5 分钟输出速率，每柱 30 秒，共用刻度 0 至 '+($scale.ToString('0.###',[Globalization.CultureInfo]::InvariantCulture))+' token 每秒'}
         $item.Tone=$tone;$item.State=$displayState;$item.Mark=$mark;$item.RowFill=$rowFill
         $item.ChartTone=if($displayState -eq 'failed'){'#9BF2949A'}elseif($displayState -in @('waiting','interrupted')){'#807E919B'}else{Theme-Color 'Chart'}
         $item.ChartLastTone=if($displayState -in @('waiting','interrupted')){'#B07E919B'}else{$tone}
@@ -94,6 +104,7 @@ function Get-MiniDisplayRows([object[]]$entries,[bool]$fresh,[double]$scale) {
         $item.MarkVisibility=if($mark){'Visible'}else{'Collapsed'};$item.RateVisibility=if($mark){'Collapsed'}else{'Visible'}
         $item.RingVisibility=if($mark -in @('?','!')){'Visible'}else{'Collapsed'}
         if($mark){$item.Accessible=$title+'，'+$state}
+        if($parentTitle){$item.Accessible+='，父会话：'+$parentTitle}
         $trend=@($row.trend|Where-Object {$null -ne $_})
         for($i=0;$i -lt 10;$i++){
             $point=if($i -lt $trend.Count){$trend[$i]}else{$null}

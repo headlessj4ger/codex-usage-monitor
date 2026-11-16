@@ -4,6 +4,7 @@ Add-Type -AssemblyName System.Data
 . (Join-Path $PSScriptRoot '..\src\ui-state.ps1')
 . (Join-Path $PSScriptRoot '..\src\mini.ps1')
 $script:assertions=0;$script:speedRows=@{}
+$script:sessions=@{}
 function Assert-Mini([bool]$condition,[string]$message){if(-not $condition){throw $message};$script:assertions++}
 function Test-Row($id,$parent,$state='running',$started=1){
     return [pscustomobject]@{id=$id;title=$id;model='model';effort='high';parent_id=$parent;source='user';is_open=($state -notin @('completed','failed','interrupted'));state=$state;long_stale=$false;started_ms=$started;available=$true;one=@{output_tps=20};trend=@(@{at=100000;output_tps=10},@{at=130000;output_tps=20})}
@@ -19,8 +20,35 @@ $stable=@(Get-MiniEntries @($other,$child,$main) @('main','child','other'))
 Assert-Mini (($stable.Row.id -join ',') -eq 'main,child,other') 'Rate refresh reordered existing sessions'
 $orphan=@(Get-MiniEntries @($child))
 Assert-Mini ($orphan.Count -eq 1 -and $orphan[0].Row.id -eq 'child') 'Active orphan disappeared'
+$main|Add-Member -NotePropertyName mini_visible -NotePropertyValue $false
+$child|Add-Member -NotePropertyName mini_visible -NotePropertyValue $true
+$script:speedRows=@{main=$main;child=$child;other=$other}
+$hiddenParent=@(Get-MiniEntries @($other,$main,$child) @('other','main','child'))
+$hiddenDisplay=@(Get-MiniDisplayRows $hiddenParent $true 20)
+$childDisplay=@($hiddenDisplay|Where-Object {$_.Id -eq 'child'})[0]
+Assert-Mini (($hiddenParent.Row.id -join ',') -eq 'other,child') 'Hidden parent should remain excluded from the activity list'
+Assert-Mini ($childDisplay.Branch -eq '' -and $childDisplay.Indent -eq '8,0,0,0') 'Hidden-parent child falsely appears nested under an unrelated session'
+Assert-Mini ($childDisplay.Tooltip.Contains('父会话：main') -and $childDisplay.Accessible.Contains('父会话：main')) 'Hidden-parent relationship was lost from tooltip or accessibility'
+Assert-Mini ($childDisplay.Subtitle.StartsWith('子会话')) 'Standalone child lost its actual child identity'
+$main.mini_visible=$true
+$restored=@(Get-MiniEntries @($other,$main,$child) @('other','child'))
+$restoredDisplay=@(Get-MiniDisplayRows $restored $true 20)
+$childDisplay=@($restoredDisplay|Where-Object {$_.Id -eq 'child'})[0]
+Assert-Mini (($restored.Row.id -join ',') -eq 'other,main,child' -and $childDisplay.Branch -eq '└' -and $childDisplay.Indent -eq '28,0,0,0') 'Restored parent did not restore the visible branch'
+$grandchild=Test-Row 'grandchild' 'child';$main.mini_visible=$false
+$subtree=@(Get-MiniEntries @($other,$main,$child,$grandchild) @('other','main','child','grandchild'))
+$subtreeDisplay=@(Get-MiniDisplayRows $subtree $true 20)
+Assert-Mini (($subtree.Row.id -join ',') -eq 'other,child,grandchild' -and $subtreeDisplay[1].Branch -eq '' -and $subtreeDisplay[2].Branch -eq '└') 'An orphaned subtree must retain only its actual visible edges'
+$script:speedRows=@{};$script:sessions=@{main=$main}
+$metadataDisplay=@(Get-MiniDisplayRows $orphan $true 20)
+Assert-Mini ($metadataDisplay[0].Tooltip.Contains('父会话：main')) 'Parent outside the speed window should resolve from session metadata'
+$script:sessions=@{};$unknownParent=@(Get-MiniDisplayRows $orphan $true 20)
+Assert-Mini ($unknownParent[0].Tooltip.Contains('父会话：main') -and $unknownParent[0].Branch -eq '') 'Unresolved parent should retain its ID without inventing a visible branch'
+$main.PSObject.Properties.Remove('mini_visible');$child.PSObject.Properties.Remove('mini_visible')
 $main.parent_id='child';$cycle=@(Get-MiniEntries @($main,$child))
 Assert-Mini ($cycle.Count -eq 2 -and @($cycle.Row.id|Sort-Object -Unique).Count -eq 2) 'Cyclic relationship duplicated or hid rows'
+$cycleDisplay=@(Get-MiniDisplayRows $cycle $true 20)
+Assert-Mini ($cycleDisplay[0].Branch -eq '' -and $cycleDisplay[0].Indent -eq '8,0,0,0') 'Cycle fallback root must not imply attachment to a preceding group'
 $main.parent_id=''
 Assert-Mini (@(Get-MiniEntries @()).Count -eq 0) 'Empty active list'
 $scale=Get-MiniScale $rows
