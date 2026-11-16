@@ -87,6 +87,7 @@ function flattenProcesses(rows, knownIds, monitorPid) {
 
 class Collector {
   constructor(options = {}) {
+    this.processSampler = options.processSampler;
     this.home = options.home || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
     this.dataDir = options.dataDir || path.join(__dirname, 'data');
     fs.mkdirSync(this.dataDir, { recursive: true });
@@ -571,16 +572,16 @@ class Collector {
   async sampleProcesses() {
     if (process.platform !== 'win32') { this.processError='进程采样仅支持 Windows'; return; }
     if (this.sampling) return;
+    if (!this.processSampler) { this.processAt=Date.now();this.processError='未提供进程采样器';return; }
     this.sampling = true;
-    const script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Select-Object @{n='pid';e={$_.ProcessId}},@{n='ppid';e={$_.ParentProcessId}},@{n='name';e={$_.Name}},@{n='created';e={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}},@{n='memory';e={[double]$_.WorkingSetSize}},@{n='cpu';e={([double]$_.KernelModeTime+[double]$_.UserModeTime)/10000000}},@{n='command';e={$_.CommandLine}}) | ConvertTo-Json -Compress";
     try {
       const rows = await new Promise((resolve,reject) => {
-        const child=spawn(path.join(process.env.SystemRoot || 'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+        const child=spawn(this.processSampler,['sample-processes'],{windowsHide:true,stdio:['ignore','pipe','pipe']});
         let data='',error='';const timer=setTimeout(()=>{child.kill();reject(new Error('进程采样超时'));},12000);
         child.stdout.on('data',d=>{data+=d;if(data.length>8*1024*1024){child.kill();reject(new Error('进程列表过大'));}});
         child.stderr.on('data',d=>{error+=d;});
         child.on('error',e=>{clearTimeout(timer);reject(e);});
-        child.on('close',code=>{clearTimeout(timer);if(code!==0)reject(new Error(error.trim().slice(0,180)||'进程采样失败'));else{const value=parse(data.replace(/^\uFEFF/,''),[]);resolve(Array.isArray(value)?value:[value]);}});
+        child.on('close',code=>{clearTimeout(timer);if(code!==0)reject(new Error(error.trim().slice(0,180)||'进程采样失败'));else{try{const value=JSON.parse(data.replace(/^\uFEFF/,''));if(!Array.isArray(value))throw new Error('进程采样格式错误');resolve(value);}catch(e){reject(e);}}});
       });
       this.processes=flattenProcesses(rows,new Set(this.sessions.keys()),process.pid);
       this.processAt=Date.now();this.processError=null;
@@ -642,7 +643,7 @@ class CollectorService {
 }
 async function main() {
   const arg = name => { const i=process.argv.indexOf(name);return i>=0?process.argv[i+1]:undefined; };
-  const collector=new Collector({home:arg('--home'),dataDir:arg('--data')});
+  const collector=new Collector({home:arg('--home'),dataDir:arg('--data'),processSampler:arg('--process-sampler')});
   if (process.argv.includes('--once')) { await collector.scan(); await collector.sampleProcesses();process.stdout.write(JSON.stringify(collector.snapshot())+'\n');collector.close();return; }
   let closing=false;
   const send=o=>{if(!closing)process.stdout.write(JSON.stringify(o)+'\n');};

@@ -1,6 +1,6 @@
 {
   "name": "codex-usage-monitor",
-  "version": "2.7.0",
+  "version": "3.0.0",
   "description": "Windows tray and Acrylic mini monitor for local Codex tokens, sessions, rates and quota estimates",
   "license": "MIT",
   "author": "headlessj4ger",
@@ -13,9 +13,7 @@
   "bin": { "codex-usage-monitor": "bin/codex-usage-monitor.cjs" },
   "files": [
     "bin/*.cjs", "lib/*.cjs", "runtime.json",
-    "src/*.cjs", "src/*.ps1", "src/*.xaml", "src/*.cmd", "src/*.vbs", "src/version.json",
-    "src/assets/app.ico", "src/assets/logo.png", "src/assets/README.txt",
-    "src/runtime/node.exe", "src/runtime/LICENSE.node.txt", "src/runtime/README.txt",
+    "native/",
     "docs/user-guide.md", "docs/metrics.md", "CHANGELOG.md"
   ],
   "scripts": {

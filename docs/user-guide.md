@@ -1,16 +1,16 @@
-# Codex 用量透视 2.7.0
+# Codex 用量透视 3.0.0
 
 Windows 原生托盘程序，用于查看本机 Codex 的会话用量、周配额估算、会话关系及活动速率。
 
 ## 启动与退出
 
-1. 将整个程序文件夹解压到固定、可写的位置，双击 `Start.cmd`。
+1. 将整个程序文件夹解压到固定、可写的位置，双击 `CodexUsageMonitor.exe`。
 2. 首次启动自动读取本机 Codex 数据并建立缓存。后续启动复用已有实例，恢复上次窗口模式。
 3. 关闭主窗口会收起到托盘。双击托盘图标可恢复，从托盘菜单选择“退出程序”才会停止采集。
 
-随包提供 Node.js 24.12.0 x64 和许可证。界面使用 Windows PowerShell 5.1 与 WPF；无需安装 npm 包。Acrylic 毛玻璃效果依赖 Windows 11 的桌面合成支持。
+随包提供 .NET 桌面运行时、Node.js 24.12.0 x64 和许可证。程序运行时无需 PowerShell。Acrylic 毛玻璃效果依赖 Windows 11 的桌面合成支持。
 
-启动参数：`Start.cmd -Mini` 打开小窗，`-Main` 打开主窗，`-Tray` 收起到托盘，`-Check` 检查运行环境。
+启动参数：`CodexUsageMonitor.exe mini` 打开小窗，`main` 打开主窗，`tray` 收起到托盘，`demo` 打开演示。npm 用户可用 `codex-usage-monitor doctor` 检查运行环境。
 
 ## 主窗口
 

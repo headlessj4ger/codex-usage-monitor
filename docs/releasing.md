@@ -6,7 +6,7 @@
 
 1. 同时更新 `package.json` 和 `src/version.json` 的版本号，补充 `CHANGELOG.md`。
 2. 执行 `npm test` 和 `npm run test:ui`。
-3. 执行 `scripts/package.ps1`、`scripts/verify-package.ps1`、`scripts/package-npm.ps1` 和 `scripts/test-npm.ps1`。
+3. 使用 .NET 10 SDK 运行 `scripts/publish-native.ps1`，再执行 `scripts/package.ps1`、`scripts/verify-package.ps1`、`scripts/package-npm.ps1` 和 `scripts/test-npm.ps1`。
 4. 在 GitHub 创建对应版本的 Release，上传 `outputs/` 下该版本的 ZIP、TGZ 及两个 SHA-256 文件。
 
 打包使用文件清单；缓存、日志、个人设置与本机验证原始记录不发布。发布前检查 `git diff --cached`，不提交本机路径或会话信息。

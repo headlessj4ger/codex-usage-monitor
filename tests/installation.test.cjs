@@ -51,8 +51,9 @@ test('npm state remains outside the installed package and custom Codex home is f
   assert.equal(dataDirectory(env), path.join(env.LOCALAPPDATA, 'CodexUsageMonitor'));
   assert.equal(launch.options.env.CODEX_HOME, env.CODEX_HOME);
   assert.equal(launch.options.env.CODEX_MONITOR_DATA, dataDirectory(env));
-  assert.equal(launch.args.at(-1), '-mini');
-  assert.equal(launch.options.windowsHide, true);
+  assert.equal(launch.args.at(-1), 'mini');
+  assert.equal(path.basename(launch.executable), 'CodexUsageMonitor.exe');
+  assert.equal(launch.options.detached, true);
   assert.throws(() => dataDirectory({ CODEX_MONITOR_DATA: 'relative-folder' }), /absolute/);
 });
 test('CLI version matches the application and invalid commands fail without launching', () => {

@@ -2,11 +2,11 @@
 
 ## 运行结构
 
-`Start.cmd → launch.ps1 → monitor.ps1 → collector.cjs`。
+`CodexUsageMonitor.exe → runtime/node.exe collector.cjs`。
 
-npm 安装由 `bin/codex-usage-monitor.cjs` 调用同一启动器，并将 `CODEX_MONITOR_DATA` 指向用户数据目录。`storage.ps1` 统一解析缓存与设置路径。ZIP 默认保持便携式布局。
+npm 命令从包内启动同一 EXE，并将 `CODEX_MONITOR_DATA` 指向用户数据目录。ZIP 默认保持便携式布局。
 
-启动器检查文件与运行时，通过命名互斥量和事件实现单实例及就绪握手。PowerShell 进程承载 WPF 主窗口、小窗和托盘；一个 Node.js 子进程负责采集，通过标准输入输出交换 JSON 行。
+C# 主程序用命名互斥量保证单实例，并通过限当前用户的命名管道接收后续启动指令。EXE 承载主窗、小窗、托盘和动效；Node.js 子进程通过标准输入输出交换 JSON 行。系统进程采样使用同一 EXE 的后台 WMI 子命令，只传递用于关联的会话标识。
 
 | 模块 | 职责 |
 | --- | --- |

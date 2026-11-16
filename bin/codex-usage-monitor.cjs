@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
 const { spawn, spawnSync } = require('node:child_process');
 const { version } = require('../package.json');
 const { assertPlatform, ensureRuntime, matchesRuntime, runtimePath, spec } = require('../lib/runtime.cjs');
@@ -21,22 +19,24 @@ async function main() {
   if (command === 'data-path') { console.log(dataDirectory()); return; }
   if (command === 'doctor') {
     const valid = await matchesRuntime();
-    const home = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
-    const launch = launchOptions('start');
-    const runtimeCheck = valid ? spawnSync(runtimePath, ['--no-warnings', path.join(__dirname, '../src/runtime-check.cjs')], { windowsHide: true, encoding: 'utf8', timeout: 10000 }) : null;
-    const ready = valid && runtimeCheck.status === 0 && fs.existsSync(launch.executable);
-    console.log(JSON.stringify({ version, platform: `${process.platform}-${process.arch}`, ready, runtime: { version: spec.version, sha256Valid: valid, sqliteReady: runtimeCheck?.status === 0 }, powershell: fs.existsSync(launch.executable), codexHome: home, codexFound: fs.existsSync(home), dataDirectory: dataDirectory() }, null, 2));
-    if (!ready) process.exitCode = 1;
+    if (!valid) throw new Error('Bundled runtime missing or invalid. Reinstall the complete release package.');
+    const launch = launchOptions('doctor');
+    const result = spawnSync(launch.executable, launch.args, { ...launch.options, encoding: 'utf8', timeout: 15000 });
+    if (result.error || result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || `Native check exited with code ${result.status}.`);
+    console.log(JSON.stringify({ ...JSON.parse(result.stdout), sha256Valid: true }, null, 2));
     return;
   }
   if (!['start', 'mini', 'main', 'tray', 'demo', 'install-runtime'].includes(command)) throw new Error(`Unknown command: ${command}. Run codex-usage-monitor help.`);
-  await ensureRuntime({ onDownload: () => console.log(`Downloading verified Node.js ${spec.version} from nodejs.org...`) });
-  if (command === 'install-runtime') { console.log(`Node.js ${spec.version} runtime verified.`); return; }
+  if (command === 'install-runtime') {
+    await ensureRuntime({ onDownload: () => console.log(`Downloading verified Node.js ${spec.version} from nodejs.org...`) });
+    console.log(`Node.js ${spec.version} runtime verified.`); return;
+  }
   const launch = launchOptions(command);
+  if (!fs.existsSync(launch.executable) || !fs.existsSync(runtimePath)) throw new Error('Install the complete GitHub Release package, or build the native app from source.');
   await new Promise((resolve, reject) => {
     const child = spawn(launch.executable, launch.args, launch.options);
     child.once('error', reject);
-    child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`Launcher exited ${signal || code}. Check startup-error.log in ${dataDirectory()}.`)));
+    child.once('spawn', () => { child.unref(); resolve(); });
   });
 }
 main().catch(error => { console.error(`Codex Usage Monitor: ${error.message}`); process.exitCode = 1; });

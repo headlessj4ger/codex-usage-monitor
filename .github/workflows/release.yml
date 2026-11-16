@@ -23,6 +23,10 @@ jobs:
           package-manager-cache: false
       - run: node bin/codex-usage-monitor.cjs install-runtime
       - run: ./scripts/test.ps1
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - run: ./scripts/publish-native.ps1
       - run: ./scripts/package.ps1
       - run: ./scripts/verify-package.ps1
       - run: ./scripts/package-npm.ps1

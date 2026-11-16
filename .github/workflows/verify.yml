@@ -1,7 +1,7 @@
 name: Verify Windows package
 on:
   push:
-    branches: [main]
+    branches: [main, migration/native-wpf]
   pull_request:
 permissions:
   contents: read
@@ -19,7 +19,21 @@ jobs:
           package-manager-cache: false
       - run: node bin/codex-usage-monitor.cjs install-runtime
       - run: ./scripts/test.ps1
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - run: ./scripts/publish-native.ps1
       - run: ./scripts/package.ps1
       - run: ./scripts/verify-package.ps1
       - run: ./scripts/package-npm.ps1
       - run: ./scripts/test-npm.ps1
+      - run: ./scripts/test-startup.ps1
+      - run: ./scripts/test-startup.ps1 -Npm
+      - run: ./scripts/test.ps1 -Ui
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-verification
+          path: |
+            .build/verification/native-ui/ui-checks.json
+            .build/verification/native-ui/*.log

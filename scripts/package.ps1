@@ -1,12 +1,10 @@
 . (Join-Path $PSScriptRoot 'common.ps1')
 $source=Join-Path $ProjectRoot 'src';$version=[IO.File]::ReadAllText((Join-Path $source 'version.json'))|ConvertFrom-Json
-$files=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'release-files.json'))|ConvertFrom-Json
+$native=Join-Path $ProjectRoot '.build\native-publish'
+if(-not (Test-Path -LiteralPath (Join-Path $native 'CodexUsageMonitor.exe'))){throw 'Run scripts/publish-native.ps1 first'}
 $stage=Join-Path $ProjectRoot '.build\package\CodexUsageMonitor';Remove-ProjectTree $stage;[void][IO.Directory]::CreateDirectory($stage)
-foreach($name in $files){
-    if([IO.Path]::GetFileName($name) -cne $name){throw ('Invalid release file: '+$name)}
-    Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $stage $name)
-}
-foreach($directory in @('assets','runtime')){Copy-Item -LiteralPath (Join-Path $source $directory) -Destination $stage -Recurse}
+Get-ChildItem -LiteralPath $native | Copy-Item -Destination $stage -Recurse
+foreach($name in @('Start.cmd','Demo.cmd')){Copy-Item -LiteralPath (Join-Path $ProjectRoot ('scripts\launcher\'+$name)) -Destination $stage}
 Copy-Item -LiteralPath (Join-Path $ProjectRoot 'docs\user-guide.md') -Destination (Join-Path $stage 'README.md')
 Copy-Item -LiteralPath (Join-Path $ProjectRoot 'CHANGELOG.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE') -Destination $stage

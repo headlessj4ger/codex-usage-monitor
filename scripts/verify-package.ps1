@@ -20,7 +20,7 @@ try{
     }
     foreach($entry in $zip.Entries){
         if(-not $known.ContainsKey($entry.FullName)){throw ('Unlisted file: '+$entry.FullName)}
-        if($entry.FullName -match '/data/|/settings\.json$|\.sqlite|\.log$|\.test\.|\.tap$'){throw ('Private or test file in release: '+$entry.FullName)}
+        if($entry.FullName -match '/data/|/settings\.json$|\.sqlite|\.log$|\.test\.|\.tap$|\.ps1$'){throw ('Unexpected runtime package file: '+$entry.FullName)}
     }
     [pscustomobject]@{version=$manifest.version;verified_files=$manifest.files.Count;private_files=0;sha256=$expected;passed=$true}|ConvertTo-Json
 }finally{$zip.Dispose()}

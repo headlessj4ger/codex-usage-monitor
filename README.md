@@ -2,26 +2,24 @@
 
 原生 Windows 托盘程序，查看本机 Codex 的 token 用量、活动速率、会话与子会话关系，以及周配额估算。提供深色半透明小窗，支持新建、运行、待回答、失败、完成和中断状态的动画。
 
-独立社区项目，与 OpenAI 无隶属关系。界面为中文。支持 **Windows 11 x64**，使用系统自带的 Windows PowerShell 5.1 / WPF，以及随包提供的 Node.js 24.12.0。
-
-PowerShell 策略须允许运行本地脚本。若设备由组织管理且禁止脚本，需由管理员按设备策略处理；程序不会修改执行策略或系统安全设置。
+独立社区项目，与 OpenAI 无隶属关系。界面为中文，支持 **Windows 11 x64**。主程序是 C# WPF 原生 EXE，安装包自带 .NET 桌面运行时和 Node.js 24.12.0。
 
 ## 安装
 
 ### 下载完整 ZIP
 
-从 [最新发行版](https://github.com/headlessj4ger/codex-usage-monitor/releases/latest) 下载 `CodexUsageMonitor-2.7.0-win-x64.zip`，完整解压到可写目录，双击 `Start.cmd`。无需预装 Node.js 或 npm。`Demo.cmd` 可以查看模拟会话与全部动效。
+从 [发行版页面](https://github.com/headlessj4ger/codex-usage-monitor/releases) 下载相应版本的 `CodexUsageMonitor-<版本>-win-x64.zip`，完整解压到可写目录，双击 `CodexUsageMonitor.exe`。无需预装 .NET、Node.js 或 npm。`Demo.cmd` 可以查看模拟会话与动效。
 
 ### 通过 npm 安装完整包
 
 已有 Node.js 18+ 和 npm 的 Windows x64 用户，在终端运行：
 
 ```powershell
-npm install -g https://github.com/headlessj4ger/codex-usage-monitor/releases/download/v2.7.0/codex-usage-monitor-2.7.0.tgz
+npm install -g ./codex-usage-monitor-3.0.0.tgz
 codex-usage-monitor
 ```
 
-安装包内含采集器使用的完整 Node.js 运行时，安装时验证 SHA-256。此命令直接从 GitHub Release 安装，无需 npm 账号。当前未发布到 npmjs 注册表。
+在 tgz 下载目录运行命令。此包包含原生 EXE、.NET 桌面运行时和 Node.js 采集器，安装时校验 Node.js SHA-256，无需 npm 账号。若当前发行页只有 2.x，3.x 尚未公开发布。
 
 ```powershell
 codex-usage-monitor mini       # 打开悬浮小窗
@@ -64,6 +62,7 @@ codex-usage-monitor data-path  # 查看统计数据位置
 ```powershell
 npm install
 npm test
+powershell.exe -NoProfile -File scripts/publish-native.ps1
 npm run test:ui
 npm run pack:release
 powershell.exe -NoProfile -File scripts/package.ps1
@@ -71,11 +70,12 @@ powershell.exe -NoProfile -File scripts/verify-package.ps1
 powershell.exe -NoProfile -File scripts/test-npm.ps1
 ```
 
-`npm install` 会从 Node.js 官方下载固定版本，校验后保存至 `src/runtime/node.exe`。没有第三方 npm 依赖。普通测试使用合成数据；WPF 自检只读本机 Codex 数据，测试缓存和设置写入 `.build/`。
+`npm install` 从 Node.js 官方下载并校验固定版本。源码构建需要 .NET 10 SDK；运行完整包不需要 SDK。普通测试、WPF 自检和启动检查使用合成数据，诊断写入 `.build/`。
 
 | 目录 | 内容 |
 | --- | --- |
-| `src/` | WPF 界面、采集器、状态与校准逻辑 |
+| `app/` | C# WPF 界面、托盘、启动和系统进程采样 |
+| `src/` | WPF XAML、采集器、状态与校准逻辑；原 2.x 脚本留作迁移参考 |
 | `bin/`、`lib/` | npm 命令与运行时安装器 |
 | `tests/`、`scripts/` | 测试、打包与校验 |
 | `docs/` | 使用说明、架构、视觉与动效规范 |

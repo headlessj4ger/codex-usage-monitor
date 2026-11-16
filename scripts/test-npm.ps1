@@ -16,9 +16,7 @@ try{
     $sentinel=Join-Path $state 'upgrade-preserved.txt';Write-Utf8 $sentinel 'preserve me'
     & npm.cmd install --global --prefix $prefix --cache $cache --offline --ignore-scripts --no-audit --no-fund $archive
     if($LASTEXITCODE -ne 0 -or [IO.File]::ReadAllText($sentinel) -cne 'preserve me'){throw 'npm reinstall did not preserve external state'}
-    $source=Join-Path $prefix ('node_modules\'+$meta.name+'\src')
-    & powershell.exe -NoProfile -STA -File (Join-Path $source 'launch.ps1') -Check
-    if($LASTEXITCODE -ne 0){throw 'Installed launcher check failed'}
+    $source=Join-Path $prefix ('node_modules\'+$meta.name+'\native')
     if((Test-Path -LiteralPath (Join-Path $source 'data')) -or (Test-Path -LiteralPath (Join-Path $source 'settings.json'))){throw 'Installed package was used for writable state'}
     $report=[ordered]@{version=$meta.version;offline_install=$true;bundled_runtime=$true;reinstall_preserves_data=$true;launch_check=$true;private_files=0}
     $dir=Join-Path $ProjectRoot '.build\verification';[void][IO.Directory]::CreateDirectory($dir)

@@ -1,4 +1,6 @@
 /.build/
+/app/bin/
+/app/obj/
 /outputs/
 /src/data/
 /src/settings.json
