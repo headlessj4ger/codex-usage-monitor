@@ -90,7 +90,6 @@ function Get-MiniDisplayRows([object[]]$entries,[bool]$fresh,[double]$scale) {
             elseif($script:sessions -and $script:sessions.ContainsKey($parentId)){$parentTitle=Clean-Title $script:sessions[$parentId].title}
             if(-not $parentTitle){$parentTitle=$parentId}
             $tooltip+=$miniNewLine+'父会话：'+$parentTitle
-            if(-not $nested){$tooltip+=$miniNewLine+'父会话当前未在小窗显示'}
         }
         $item=@{Id=[string]$row.id;Title=$title;Subtitle=$subtitle;Rate=$rate;RateTone=$(if($fresh){(Theme-Color 'TextPrimary')}else{(Theme-Color 'TextMuted')});Tone=$(if($fresh -and $row.available){(Theme-Color 'Accent')}else{(Theme-Color 'TextMuted')});Branch=$(if($nested){'└'}else{''});Indent=((8+20*$(if($nested){[Math]::Min(2,[int]$entry.Depth)}else{0}))).ToString()+',0,0,0';Tooltip=$tooltip;Accessible=$title+'，'+$state+'，'+$rate+' token 每秒';ChartOpacity=$(if($fresh -and $row.available){'1'}else{'0.3'});ChartLabel='近 5 分钟输出速率，每柱 30 秒，共用刻度 0 至 '+($scale.ToString('0.###',[Globalization.CultureInfo]::InvariantCulture))+' token 每秒'}
         $item.Tone=$tone;$item.State=$displayState;$item.Mark=$mark;$item.RowFill=$rowFill
