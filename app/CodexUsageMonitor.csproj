@@ -10,6 +10,7 @@
     <Version>3.0.0</Version>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.Management" Version="10.0.0" />
     <Content Include="../src/*.xaml;../src/*.cjs;../src/version.json;../src/assets/*;../src/runtime/*" Exclude="../src/runtime/*.download" Link="%(RecursiveDir)%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

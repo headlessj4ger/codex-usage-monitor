@@ -17,6 +17,7 @@ if($Ui){
     if(-not (Test-Path -LiteralPath $native)){throw 'Run scripts/publish-native.ps1 first'}
     $dir=Join-Path $diagnostics 'native-ui';Remove-ProjectTree $dir;[void][IO.Directory]::CreateDirectory($dir)
     $process=Start-Process -FilePath $native -ArgumentList ('self-test "'+$dir+'"') -PassThru -RedirectStandardOutput (Join-Path $dir 'stdout.log') -RedirectStandardError (Join-Path $dir 'stderr.log')
+    $handle=$process.Handle
     if(-not $process.WaitForExit(45000)){$process.Kill();throw 'Native UI check timed out'}
     if($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $dir 'ui-checks.json'))){
         Get-Content -LiteralPath (Join-Path $dir 'stderr.log') -ErrorAction SilentlyContinue

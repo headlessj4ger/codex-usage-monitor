@@ -34,6 +34,8 @@ jobs:
         if: always()
         with:
           name: native-windows-verification
+          include-hidden-files: true
           path: |
             .build/verification/native-ui/ui-checks.json
+            .build/verification/native-ui/mini-content.png
             .build/verification/native-ui/*.log

@@ -25,6 +25,7 @@ Write-Utf8 $settings '{"refreshSeconds":10,"lastView":"Main","miniRefreshSeconds
 $first=$null;$second=$null
 try {
     $first=Start-Process -FilePath $exe -ArgumentList 'tray' -PassThru -WindowStyle Hidden
+    $firstHandle=$first.Handle
     $deadline=[DateTime]::UtcNow.AddSeconds(20)
     $cache=Join-Path $data 'usage-v2.sqlite'
     while(-not (Test-Path -LiteralPath $cache)){
@@ -33,10 +34,14 @@ try {
     }
     $dbHash=(Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash
     $second=Start-Process -FilePath $exe -ArgumentList 'tray' -PassThru -WindowStyle Hidden
+    $secondHandle=$second.Handle
     if(-not $second.WaitForExit(12000) -or $second.ExitCode -ne 0 -or $first.HasExited){throw 'Native repeated launch did not reuse its instance'}
     $children=@(Get-CimInstance Win32_Process | Where-Object {$_.ParentProcessId -eq $first.Id})
     $collectors=@($children|Where-Object {$_.Name -eq 'node.exe' -and $_.CommandLine -like '*collector.cjs*'})
     if($collectors.Count -ne 1){throw 'Expected a single Node collector'}
+    $node=Join-Path $app 'runtime\node.exe'
+    & $node -e "const {spawnSync}=require('node:child_process');const s=spawnSync(process.argv[1],['sample-processes'],{encoding:'utf8',timeout:12000});if(s.status!==0)throw Error(s.stderr||s.error||'Process sampler failed');const rows=JSON.parse(s.stdout);if(!rows.some(p=>p.ppid>0)||rows.some(p=>p.command&&!/^--thread-id [0-9a-f-]{36}$/i.test(p.command)))throw Error('Invalid process sample');" $exe
+    if($LASTEXITCODE){throw 'Native process sampler check failed'}
     $sampling=@(Get-CimInstance Win32_Process | Where-Object {$_.ParentProcessId -eq $collectors[0].ProcessId})
     if(@($children+$sampling|Where-Object {$_.Name -match '^(powershell|pwsh)\.exe$'}).Count){throw 'A runtime process started PowerShell'}
     if((Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash -ne $dbHash){throw 'Legacy settings changed unexpectedly'}

@@ -9,6 +9,8 @@ using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using static CodexUsageMonitor.ViewData;
 
 namespace CodexUsageMonitor;
@@ -16,7 +18,7 @@ namespace CodexUsageMonitor;
 sealed partial class MonitorApp
 {
     Window? demo;
-    bool selfTest, paused, demoUpdating;
+    bool selfTest, paused, demoUpdating, miniActivated, realFocusChange, movedWithBackdrop;
     int stage, tick, lastDemoPhase;
     double elapsed, rate = 1;
     readonly Stopwatch demoClock = Stopwatch.StartNew();
@@ -54,7 +56,7 @@ sealed partial class MonitorApp
         mini.Left=area.Left+(area.Width-400)/2;mini.Top=Math.Max(area.Top+16,area.Top+(area.Height-620)/2);
         demo.Left=mini.Left;demo.Top=mini.Top+400;demo.Show();mini.Owner=demo;mini.Show();
         AdvanceDemo(0);
-        if(test) TestTree();
+        if(test) { TestTree(); TestMainViews(); miniActivated=mini.Activate(); }
     }
 
     static JsonElement DemoRow(string id,string title,string state="running",string parent="",int order=0,double output=44.8)
@@ -110,15 +112,31 @@ sealed partial class MonitorApp
         {
             if(selfTest){
                 VerifyDemoStage();
-                if(stage==0){main.Show();main.UpdateLayout();main.Activate();}
+                if(stage==0){miniActivated|=mini.IsActive;main.Show();main.UpdateLayout();main.Activate();}
                 if(stage==1){
-                    if(acrylic && (CodexMiniGlass.ReadBackdrop(new WindowInteropHelper(mini).Handle)!=3 || CodexMiniGlass.InactiveAppearanceMessages==0))
-                        throw new InvalidOperationException("Acrylic activation hook did not preserve the backdrop on focus change.");
+                    if(acrylic) {
+                        var handle=new WindowInteropHelper(mini).Handle;
+                        realFocusChange=miniActivated&&!mini.IsActive&&CodexMiniGlass.InactiveAppearanceMessages>0;
+                        bool handled=false;
+                        CodexMiniGlass.FilterBackdropActivation(handle,0x0086,IntPtr.Zero,IntPtr.Zero,ref handled);
+                        var backdrop=CodexMiniGlass.ReadBackdrop(handle);
+                        if(!handled||backdrop!=3||CodexMiniGlass.HasSystemCaptionButtons(handle))
+                            throw new InvalidOperationException($"Acrylic frame validation failed: hook={handled}; backdrop={backdrop}.");
+                    }
                     main.Hide();
+                }
+                if(stage==2 && acrylic) {
+                    var x=mini.Left;
+                    mini.Left=x+60;
+                    mini.UpdateLayout();
+                    var handle=new WindowInteropHelper(mini).Handle;
+                    FixCaption();
+                    movedWithBackdrop=Math.Abs(mini.Left-x)>20 && CodexMiniGlass.ReadBackdrop(handle)==3 && !CodexMiniGlass.HasSystemCaptionButtons(handle);
+                    if(!movedWithBackdrop)throw new InvalidOperationException("Repositioning lost the Acrylic window frame.");
                 }
                 if(stage==14){
                     if(visited.Count!=stages.Length || lastDemoPhase!=6)throw new InvalidOperationException("Missing stage coverage.");
-                    File.WriteAllText(Path.Combine(storage.Data,"ui-checks.json"),JsonSerializer.Serialize(new { passed=true,stages=visited.Count,acrylic, inactiveMessages=CodexMiniGlass.InactiveAppearanceMessages,tree=true }));
+                    File.WriteAllText(Path.Combine(storage.Data,"ui-checks.json"),JsonSerializer.Serialize(new { passed=true,stages=visited.Count,acrylic, realFocusChange, movedWithBackdrop,inactiveMessages=CodexMiniGlass.InactiveAppearanceMessages,tree=true,mainViews=true }));
                     Exit();return;
                 }
             }
@@ -146,9 +164,19 @@ sealed partial class MonitorApp
             var expected=new[] {("starting",""),("running",""),("waiting","?"),("failed","!"),("completed","✓"),("interrupted","!")};
             if(!actual.SequenceEqual(expected))throw new InvalidOperationException("Wrong state marks.");
             lastDemoPhase=actual.Length;
+            CaptureMini();
         }
         if(stage==14 && table.Rows.Find("stopped") is DataRow stopped && (string)stopped["TitleTone"]!="#929BAA")
             throw new InvalidOperationException("Interrupted row did not gray out.");
+    }
+    void CaptureMini()
+    {
+        mini!.UpdateLayout();
+        var view=M<Border>("MiniSurface");
+        var bitmap=new RenderTargetBitmap((int)Math.Ceiling(view.ActualWidth),(int)Math.Ceiling(view.ActualHeight),96,96,PixelFormats.Pbgra32);
+        bitmap.Render(view);
+        var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream=File.Create(Path.Combine(storage.Data,"mini-content.png"));encoder.Save(stream);
     }
     void TestTree()
     {
@@ -163,5 +191,38 @@ sealed partial class MonitorApp
         if(restored[1].Item.S("id")!="parent" || restored[2].Depth!=1 || restored[3].Depth!=2)throw new InvalidOperationException("Restored parent did not regroup its subtree.");
         var cycle=Tree(new[]{DemoRow("a","A",parent:"b"),DemoRow("b","B",parent:"a")},IdOf,r=>r.S("parent_id")).ToArray();
         if(cycle.Length!=2 || cycle.Select(x=>IdOf(x.Item)).Distinct().Count()!=2)throw new InvalidOperationException("Cycle lost a row.");
+    }
+    void TestMainViews()
+    {
+        var now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var fixture=JsonSerializer.SerializeToElement(new {
+            at=now,last_scan=now,week_total=175,quota=new {used_percent=29.0,reset_at=now/1000+86400},coverage=new {sessions=2,with_logs=2,metadata_only=0},
+            sessions=new [] {
+                new {id="parent",title="合成主会话",source="user",model="test",week_total=100,total=100,week_known=true,updated=now},
+                new {id="child",title="合成子会话",source="subagent",model="test",week_total=75,total=75,week_known=true,updated=now}
+            },
+            edges=new[]{new {parent_id="parent",child_id="child",kind="subagent"}},
+            speed=new {rows=new[]{DemoRow("parent","合成主会话")}},
+            combinations=new[]{new {key="test/high/default",model="test",effort="high",tier="default",week_total=175,calibration_samples=1}},
+            calibration=new {reason="待校准"},
+            processes=new[]{new {pid=101,ppid=1,name="codex.exe",created="2026-11-16T07:00:00Z",memory=10485760, cpu=1.5,thread_id="child",association="explicit"}}
+        });
+        ApplySnapshot(fixture);
+        var row=tables["Live"].Table.Rows.Find("parent") ?? throw new InvalidOperationException("Live row missing.");
+        ApplySnapshot(fixture);
+        if(!ReferenceEquals(row,tables["Live"].Table.Rows.Find("parent")))throw new InvalidOperationException("Refresh replaced an existing row.");
+        ShowPage("Session");expanded.Add("parent");RenderPage();SelectRow("Session","parent");
+        if(tables["Session"].Table.Rows.Find("child") is not DataRow child || (string)child["Indent"]!="16,0,0,0" ||
+           tables["SessionFacts"].Table.Rows.Find("自身 + 子树累计") is not DataRow family || !((string)family["Value"]).StartsWith("175"))
+            throw new InvalidOperationException("Main session tree or subtree usage does not match.");
+        U<TextBox>("Search").Text="合成子会话";RenderPage();
+        if(tables["Session"].Table.Rows.Count!=2)throw new InvalidOperationException("Search omitted the parent context.");
+        U<TextBox>("Search").Clear();
+        ShowPage("Model");
+        if(tables["Model"].Table.Rows.Count!=1)throw new InvalidOperationException("Model row missing.");
+        ShowPage("Process");
+        if(tables["Process"].Table.Rows.Count!=1 || !((string)tables["Process"].Table.Rows[0]["Subtitle"]).Contains("合成子会话"))
+            throw new InvalidOperationException("Process attribution lost.");
+        ShowPage("Live");
     }
 }

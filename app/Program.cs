@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
 using System.Linq;
+using System.Management;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -156,13 +157,14 @@ static class ProcessSampler
 
     public static void Write()
     {
-        var type = Type.GetTypeFromProgID("WbemScripting.SWbemLocator", true)!;
-        dynamic locator = Activator.CreateInstance(type)!;
-        dynamic service = locator.ConnectServer(".", @"root\cimv2");
+        const string query = "SELECT ProcessId,ParentProcessId,Name,CreationDate,WorkingSetSize,KernelModeTime,UserModeTime,CommandLine FROM Win32_Process";
+        using var searcher = new ManagementObjectSearcher(@"root\cimv2", query);
+        using var processes = searcher.Get();
         var rows = new List<object>();
-        foreach (dynamic row in service.ExecQuery("SELECT ProcessId,ParentProcessId,Name,CreationDate,WorkingSetSize,KernelModeTime,UserModeTime,CommandLine FROM Win32_Process", "WQL", 48))
+        foreach (ManagementObject row in processes)
         {
-            object? Get(string name) => row.Properties_.Item(name, 0).Value;
+            using var process = row;
+            object? Get(string name) => process[name];
             var raw = Get("CreationDate") as string;
             string? created = null;
             if (raw is { Length: >= 25 } && DateTime.TryParseExact(raw[..21], "yyyyMMddHHmmss.ffffff", CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)
