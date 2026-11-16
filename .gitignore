@@ -1,0 +1,16 @@
+/.build/
+/outputs/
+/src/data/
+/src/settings.json
+*.user
+/node_modules/
+/src/runtime/node.exe
+/docs/verification/
+/docs/verification.md
+*.tgz
+*.log
+*.sqlite*
+*.download
+.env
+.env.*
+.npmrc

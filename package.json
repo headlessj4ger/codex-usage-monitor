@@ -1,0 +1,28 @@
+{
+  "name": "codex-usage-monitor",
+  "version": "2.7.0",
+  "description": "Windows tray and Acrylic mini monitor for local Codex tokens, sessions, rates and quota estimates",
+  "license": "MIT",
+  "author": "headlessj4ger",
+  "repository": { "type": "git", "url": "git+https://github.com/headlessj4ger/codex-usage-monitor.git" },
+  "homepage": "https://github.com/headlessj4ger/codex-usage-monitor#readme",
+  "bugs": { "url": "https://github.com/headlessj4ger/codex-usage-monitor/issues" },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "engines": { "node": ">=18" },
+  "bin": { "codex-usage-monitor": "bin/codex-usage-monitor.cjs" },
+  "files": [
+    "bin/*.cjs", "lib/*.cjs", "runtime.json",
+    "src/*.cjs", "src/*.ps1", "src/*.xaml", "src/*.cmd", "src/*.vbs", "src/version.json",
+    "src/assets/app.ico", "src/assets/logo.png", "src/assets/README.txt",
+    "src/runtime/node.exe", "src/runtime/LICENSE.node.txt", "src/runtime/README.txt",
+    "docs/user-guide.md", "docs/metrics.md", "CHANGELOG.md"
+  ],
+  "scripts": {
+    "postinstall": "node bin/codex-usage-monitor.cjs install-runtime",
+    "test": "powershell.exe -NoProfile -File scripts/test.ps1",
+    "test:ui": "powershell.exe -NoProfile -File scripts/test.ps1 -Ui",
+    "pack:release": "powershell.exe -NoProfile -File scripts/package-npm.ps1"
+  },
+  "keywords": ["codex", "tokens", "usage", "windows", "tray", "monitor"]
+}

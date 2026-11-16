@@ -1,0 +1,25 @@
+name: Verify Windows package
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.12.0'
+          package-manager-cache: false
+      - run: node bin/codex-usage-monitor.cjs install-runtime
+      - run: ./scripts/test.ps1
+      - run: ./scripts/package.ps1
+      - run: ./scripts/verify-package.ps1
+      - run: ./scripts/package-npm.ps1
+      - run: ./scripts/test-npm.ps1
