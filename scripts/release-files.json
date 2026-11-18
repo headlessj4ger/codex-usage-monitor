@@ -2,7 +2,7 @@
   "activity.cjs", "calibration.cjs", "collector.cjs", "questions.cjs",
   "realtime.cjs", "runtime-check.cjs", "speed.cjs", "version.json",
   "Start.cmd", "Start.vbs", "launch.ps1", "monitor.ps1",
-  "ui-state.ps1", "storage.ps1", "window.xaml", "theme.xaml", "mini.ps1",
+  "ui-state.ps1", "storage.ps1", "sample-processes.ps1", "window.xaml", "theme.xaml", "mini.ps1",
   "mini-motion.ps1", "mini.xaml", "visual-checks.ps1",
   "Demo.cmd", "launch-demo.ps1", "demo.ps1", "demo.xaml"
 ]

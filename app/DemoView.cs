@@ -198,13 +198,16 @@ sealed partial class MonitorApp
         var fixture=JsonSerializer.SerializeToElement(new {
             at=now,last_scan=now,week_total=175,quota=new {used_percent=29.0,reset_at=now/1000+86400},coverage=new {sessions=2,with_logs=2,metadata_only=0},
             sessions=new [] {
-                new {id="parent",title="合成主会话",source="user",model="test",week_total=100,total=100,week_known=true,updated=now},
-                new {id="child",title="合成子会话",source="subagent",model="test",week_total=75,total=75,week_known=true,updated=now}
+                new {id="parent",title="合成主会话",source="user",model="test",week_total=100,total=100,week_known=true,updated=now,
+                    quota_estimate=(double?)1.5,quota_estimate_status="provisional"},
+                new {id="child",title="合成子会话",source="subagent",model="test",week_total=75,total=75,week_known=true,updated=now,
+                    quota_estimate=(double?)null,quota_estimate_status=""}
             },
             edges=new[]{new {parent_id="parent",child_id="child",kind="subagent"}},
             speed=new {rows=new[]{DemoRow("parent","合成主会话")}},
-            combinations=new[]{new {key="test/high/default",model="test",effort="high",tier="default",week_total=175,calibration_samples=1}},
-            calibration=new {reason="待校准"},
+            combinations=new[]{new {key="test/high/default",model="test",effort="high",tier="default",week_total=175,calibration_samples=1,
+                cycle_share=new {used=8.59,total=2.4911,basis="weighted"},provisional_samples=4}},
+            calibration=new {reason="样本不足",fit_progress=new {historical=3,current=1}},
             processes=new[]{new {pid=101,ppid=1,name="codex.exe",created="2026-11-16T07:00:00Z",memory=10485760, cpu=1.5,thread_id="child",association="explicit"}}
         });
         ApplySnapshot(fixture);
@@ -215,11 +218,19 @@ sealed partial class MonitorApp
         if(tables["Session"].Table.Rows.Find("child") is not DataRow child || (string)child["Indent"]!="16,0,0,0" ||
            tables["SessionFacts"].Table.Rows.Find("自身 + 子树累计") is not DataRow family || !((string)family["Value"]).StartsWith("175"))
             throw new InvalidOperationException("Main session tree or subtree usage does not match.");
+        if ((string)child["Estimate"]!="待数据" ||
+            tables["Session"].Table.Rows.Find("parent") is not DataRow root ||
+            !((string)root["Estimate"]).StartsWith("≈ ", StringComparison.Ordinal))
+            throw new InvalidOperationException("Quota estimate confidence is not visible in the session table.");
         U<TextBox>("Search").Text="合成子会话";RenderPage();
         if(tables["Session"].Table.Rows.Count!=2)throw new InvalidOperationException("Search omitted the parent context.");
         U<TextBox>("Search").Clear();
         ShowPage("Model");
-        if(tables["Model"].Table.Rows.Count!=1)throw new InvalidOperationException("Model row missing.");
+        SelectRow("Model","test/high/default");
+        if(tables["Model"].Table.Rows.Find("test/high/default") is not DataRow model ||
+           (string)model["UsageShare"]!="≈ 8.59%" || (string)model["Estimate"]!="≈ 2.49%" ||
+           tables["DetailFacts"].Table.Rows.Find("占比依据") is not DataRow basis || (string)basis["Value"]!="本机计费权重分摊")
+            throw new InvalidOperationException("The model table and details did not display weighted cycle shares.");
         ShowPage("Process");
         if(tables["Process"].Table.Rows.Count!=1 || !((string)tables["Process"].Table.Rows[0]["Subtitle"]).Contains("合成子会话"))
             throw new InvalidOperationException("Process attribution lost.");

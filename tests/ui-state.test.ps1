@@ -17,4 +17,8 @@ $script:sessions=@{a=@{};b=@{};c=@{}}
 $script:snapshot=[pscustomobject]@{edges=@([pscustomobject]@{parent_id='a';child_id='b';kind='subagent'},[pscustomobject]@{parent_id='b';child_id='c';kind='subagent'},[pscustomobject]@{parent_id='c';child_id='a';kind='subagent'},[pscustomobject]@{parent_id='c';child_id='b';kind='interaction'})}
 $parents=Get-Parents
 Assert-State ($parents.Count -eq 2 -and -not $parents.ContainsKey('a')) 'Cycles or interactions entered the ownership tree'
-'PASS: stable refresh, single-cell update, insert/remove/reorder, cycle-safe parent relationships (4 checks)'
+Assert-State ((Format-Estimate 1.5 100 'provisional').StartsWith('≈ ') -and
+    (Format-Estimate 8.59 100 'weighted') -eq '≈ 8.59%' -and
+    (Format-Estimate 1.5 100 'validated') -notmatch '≈' -and
+    (Format-Estimate $null 100) -eq '待数据') 'The estimate column must distinguish tentative, verified and unavailable values'
+'PASS: stable refresh, single-cell update, insert/remove/reorder, cycle-safe parent relationships, estimate markers (5 checks)'

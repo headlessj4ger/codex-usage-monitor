@@ -8,12 +8,34 @@ function Format-Time($ms) { if(-not $ms){return '—'};return ([DateTimeOffset]:
 function Format-Percent($n) { if($null -eq $n){return '—'};return ('{0:0.00}%' -f [double]$n) }
 function Format-Effort($v) { if(-not $v -or $v -eq 'unknown'){return '未记录'};return [string]$v }
 function Format-Tier($v) { switch($v){'default'{'标准'} 'priority'{'优先'} default {if($v -and $v -ne 'unknown'){[string]$v}else{'未记录'}}} }
-function Format-Estimate($v,$tokens=1) { if($tokens -le 0){return '—'};if($null -eq $v){return '待校准'};return (Format-Percent $v) }
+function Format-Estimate($v,$tokens=1,[string]$status='') {
+    if($tokens -le 0){return '—'}
+    if($null -eq $v){return '待数据'}
+    if($status -eq 'provisional'){
+        if($v -gt 0 -and $v -lt 0.1){return '≈ <0.1%'}
+        return '≈ '+('{0:0.#}%' -f [double]$v)
+    }
+    $text=if($v -gt 0 -and $v -lt 0.01){'<0.01%'}else{'{0:0.##}%' -f [double]$v}
+    if($status -eq 'weighted'){return '≈ '+$text}
+    return $text
+}
+function Format-EstimateStatus([string]$status) {
+    switch($status){
+        'validated'{'已验证'}
+        'provisional'{'暂估'}
+        'weighted'{'本机计费权重分摊'}
+        default{'等待可用记录'}
+    }
+}
+function Format-SessionEstimate($session) {
+    if($session.quota_unlisted_model_tokens -gt 0 -and -not $session.quota_eligible_tokens){return '—'}
+    Format-Estimate $session.quota_estimate $session.week_total $session.quota_estimate_status
+}
 function Format-Rate($n) { if($null -eq $n){return '未知'};return ('{0:N2}' -f [double]$n) }
 function Format-Duration($ms) { if($null -eq $ms){return '—'};if($ms -lt 60000){return ('{0:0.0} 秒' -f ($ms/1000))};$span=[TimeSpan]::FromMilliseconds([Math]::Max(0,$ms));if($span.TotalHours -ge 1){return ('{0} 时 {1} 分' -f [Math]::Floor($span.TotalHours),$span.Minutes)};return ('{0} 分 {1} 秒' -f $span.Minutes,$span.Seconds) }
 function Speed-State($s) { switch($s){'running'{'进行中'} 'quiet'{'较久无更新'} 'completed'{'已完成'} 'interrupted'{'已中断'} 'failed'{'失败'} default{'状态未知'}} }
 function Get-Kind($s) { switch($s){'subagent'{'子代理'} 'guardian_review'{'审批子会话'} 'guardian'{'审批子会话'} 'fork'{'分叉'} 'attached'{'附属会话'} 'interaction'{'会话交互'} 'agent_created_thread'{'代理创建'} default{'主会话'}} }
-function Get-Coverage($s) { switch($s){'records'{'逐条用量'} 'metadata'{'仅累计快照'} default{'部分日志 + 累计快照'}} }
+function Get-Coverage($s) { switch($s){'records'{'逐条用量'} 'metadata'{'仅累计快照'} 'inherited'{'缺少自身用量记录'} default{'用量记录不完整'}} }
 function Clean-Title($s) { return ([string]$s -replace '[\r\n]+',' ').Trim() }
 function Fact([string]$id,[string]$label,$value) { return @{Id=$id;Label=$label;Value=$(if($null -eq $value -or [string]$value -eq ''){'—'}else{[string]$value})} }
 function New-StateTable([string[]]$fields) {
@@ -68,7 +90,7 @@ function Get-SessionRows {
         $note=(Get-Kind $s.source)+' · '+$s.model
         if($hasChild){$note+=' · '+$children[$s.id].Count+' 个子会话'}
         if($s.archived){$note+=' · 已归档'}
-        @{Id=$s.id;Title=(Clean-Title $s.title);Subtitle=$note;Indent=([Math]::Min($depth,10)*16).ToString()+',0,0,0';Chevron=$(if($hasChild){if($expanded){'⌄'}else{'›'}}else{''});Week=$(if($s.week_known){Format-Count $s.week_total}else{'未知'});Estimate=(Format-Estimate $s.quota_estimate $s.week_total);Tooltip=$s.title+"`n"+$s.id+"`n"+$s.cwd}
+        @{Id=$s.id;Title=(Clean-Title $s.title);Subtitle=$note;Indent=([Math]::Min($depth,10)*16).ToString()+',0,0,0';Chevron=$(if($hasChild){if($expanded){'⌄'}else{'›'}}else{''});Week=$(if($s.week_known){Format-Count $s.week_total}else{'未知'});Estimate=(Format-SessionEstimate $s);Tooltip=$s.title+"`n"+$s.id+"`n"+$s.cwd}
         if($expanded){$list=$children[$s.id];for($i=$list.Count-1;$i -ge 0;$i--){$stack.Push(@{Session=$list[$i];Depth=$depth+1})}}
     }
 }

@@ -24,7 +24,26 @@ static class ViewData
     public static string Count(this JsonElement json, string key) => json.J(key).Number()?.ToString("N0", CultureInfo.InvariantCulture) ?? "未知";
     public static string Rate(this JsonElement json, string key) => json.J(key).Number()?.ToString("N2", CultureInfo.InvariantCulture) ?? "未知";
     public static string Pct(this JsonElement json, string key) => json.J(key).Number() is double n ? $"{n:0.00}%" : "—";
-    public static string Estimate(this JsonElement json, string key = "week_total") => json.N(key) <= 0 ? "—" : json.J("quota_estimate").Valid() ? json.Pct("quota_estimate") : "待校准";
+    public static string Estimate(this JsonElement json) => FormatEstimate(json.N("week_total"),
+        json.J("quota_estimate").Number(), json.S("quota_estimate_status"));
+    public static string CycleShare(this JsonElement json, string key)
+    {
+        var share = json.J("cycle_share");
+        return FormatEstimate(json.N("week_total"), share.J(key).Number(), share.S("basis"));
+    }
+    static string FormatEstimate(double tokens, double? amountValue, string basis)
+    {
+        if (tokens <= 0) return "—";
+        if (amountValue is not double value) return "待数据";
+        var amount = value is > 0 and < 0.01 ? "<0.01%" : value.ToString("0.##", CultureInfo.InvariantCulture) + "%";
+        return basis is "provisional" or "weighted" ? $"≈ {amount}" : amount;
+    }
+    public static string EstimateStatus(this JsonElement json, string key = "quota_estimate_status") => json.S(key) switch {
+        "validated" => "已验证",
+        "provisional" => "暂估",
+        "weighted" => "本机计费权重分摊",
+        _ => "等待可用记录"
+    };
     public static string Stamp(this JsonElement json, string key) => Date(json.N(key));
     public static string Date(double ms) => ms > 0 && ms < 253402300799999 ? DateTimeOffset.FromUnixTimeMilliseconds((long)ms).ToOffset(TimeSpan.FromHours(8)).ToString("MM-dd HH:mm:ss") : "—";
     public static string Duration(this JsonElement json, string key) => json.J(key).Number() is double ms ? Duration(ms) : "—";

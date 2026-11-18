@@ -92,3 +92,29 @@ test('a delayed history projection cannot erase or resurrect an explicit log que
   history.prepare('INSERT INTO thread_items VALUES(?,?,?,?,?,?,?)').run('thread','turn','q','agentMessage','{"id":"q","questions":[{}]}',at,at);
   await c.scanActivity({files:[file],history:true});assert.equal(c.sessions.get('thread').pending_questions.length,0);history.close();c.close();
 });
+
+test('the first quota movement updates the estimate before the full refresh interval', async t => {
+  const {c, write} = fixture(), messages = [];
+  const resets_at = Math.floor(Date.now() / 1000) + 86400;
+  const quota = used_percent => write('event_msg', { type: 'token_count',
+    rate_limits: { primary: { window_minutes: 10080, used_percent, resets_at } } });
+  write('session_meta', { id: 'thread', creator_account_id: 'fixture-account' });
+  quota(0);
+  const service = new CollectorService(c, m => messages.push(m), 60);
+  t.after(() => { service.stop(); c.close(); });
+  await service.start();
+  await delay(20);
+  write('turn_context', { turn_id: 'turn', model: 'gpt-6.2-sol', effort: 'high', service_tier: 'default' });
+  write('token_usage_record', { thread_id: 'thread', turn_id: 'turn', response_id: 'first',
+    usage: { input_tokens: 400000, output_tokens: 100000, total_tokens: 500000 } });
+  await delay(20);
+  quota(1);
+  const updated = () => messages.find(m => m.type === 'snapshot' && m.quota?.used_percent === 1);
+  await until(updated);
+  assert.equal(updated().sessions[0].quota_estimate_status, 'provisional');
+  assert.equal(updated().sessions[0].quota_estimate, 1);
+  service.configure(0);
+  quota(2);
+  await delay(250);
+  assert.ok(!messages.some(m => m.type === 'snapshot' && m.quota?.used_percent === 2));
+});

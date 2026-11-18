@@ -10,7 +10,8 @@ const latest={at_ms:t+DAY,scope:'account',plan:'unknown',reset_at:(t+2*DAY)/1000
 function samples(n=40){return Array.from({length:n},(_,i)=>{const av=(1+(i%5))/10,bv=(1+((i*3)%7))/10;return {start:t+i*60000,end:t+(i+1)*60000,reset_at:latest.reset_at,groups:{[a]:[av*0.2,av*0.6,av*0.2],[b]:[bv*0.2,bv*0.6,bv*0.2]},total:av+bv,delta:av*2+bv*8};});}
 test('learns differing combination rates and validates on later unseen blocks',()=>{
  const c=calibrate(samples(),latest);assert.equal(c.mode,'learned');assert.equal(c.channel_model,false);assert.equal(c.train,30);assert.equal(c.holdout,10);assert.ok(c.mae<c.baseline_mae);assert.ok(Math.abs(c.groups.find(g=>g.key===a).rates[0]-2)<0.01);assert.ok(Math.abs(c.groups.find(g=>g.key===b).rates[0]-8)<0.01);
- const e=estimateRows([{model:'a',effort:'high',tier:'default',scope:'account',input:800000,cached:600000,output:200000,total:1000000}],c);assert.ok(Math.abs(e.value-2)<0.01);
+ const e=estimateRows([{model:'a',effort:'high',tier:'default',scope:'account',kind:'response',input:800000,cached:600000,output:200000,total:1000000}],c);
+ assert.ok(Math.abs(e.value-2)<0.01);assert.equal(e.status,'validated');
 });
 test('enough varied samples learn separate uncached, cached and output rates',()=>{
  let seed=123;const random=()=>((seed=(seed*1664525+1013904223)>>>0)/2**32);
@@ -46,6 +47,145 @@ test('rare new combinations cannot contaminate or block the well-observed combin
 });
 function quota(at,used,extra={}){return {at_ms:at,used_percent:used,reset_at:latest.reset_at,limit_id:'codex',window_minutes:10080,scope:'account',plan:'unknown',...extra};}
 function token(at,extra={}){return {at_ms:at,model:'a',effort:'high',tier:'default',scope:'account',kind:'response',input:900,cached:600,output:100,total:1000,...extra};}
+
+test('one snapshot cannot give a quota coefficient, and a 1 pp solo interval estimates only its own combination', () => {
+  const event = token(t + 1, { input: 400000, cached: 120000, output: 100000, total: 500000 });
+  const q = quota(t + 30000, 12);
+  const reference = calibrationReport([event], [q], q);
+  assert.equal(reference.provisional, null);
+  assert.deepEqual(estimateRows([event], reference), {
+    value: null, status: null, known_value: null, covered_tokens: 0, estimated_tokens: 0, total_tokens: 500000
+  });
+  const provisional = calibrationReport([event], [quota(t, 11), q], q);
+  assert.equal(provisional.mode, 'pending');
+  assert.equal(provisional.provisional.observations, 1);
+  assert.equal(provisional.provisional.group_rates[a], 2);
+  assert.equal(estimateRows([event], provisional).value, 1);
+  const newModel = token(t + 10, { model: 'future-model' });
+  assert.equal(estimateRows([newModel], provisional).value, null);
+  const zero = quota(t + 30000, 0);
+  assert.equal(estimateRows([event], calibrationReport([event], [zero], zero)).value, null);
+});
+
+test('an interval fit that predicts more than the account used is suspended but keeps its sample counts', () => {
+  const q = quota(t + 3000, 4);
+  const previousAt = t - 7 * DAY;
+  const previousReset = q.reset_at - 7 * DAY / 1000;
+  const qs = [quota(previousAt, 0, { reset_at: previousReset }), quota(previousAt + 1000, 1, { reset_at: previousReset }),
+    quota(t, 0), quota(t + 1000, 4), q];
+  const events = [
+    token(t + 500, { input: 80000, cached: 40000, output: 20000, total: 100000 }),
+    token(t + 1200, { input: 750000, cached: 500000, output: 50000, total: 800000 }),
+    token(t + 1500, { model: 'unknown', input: 80000, cached: 40000, output: 20000, total: 100000 })
+  ];
+  const report = calibrationReport(events.concat(token(previousAt + 500)), qs, q, { allowedModels: new Set(['a']) });
+  assert.match(report.provisional_warning, /高于账户快照/);
+  assert.equal(report.provisional, null);
+  assert.equal(report.fit_progress.historical, 1);
+  assert.equal(report.fit_progress.current, 1);
+  assert.equal(report.fit_progress.support[a], 2);
+  const estimate = estimateRows(events.slice(0,2), report);
+  assert.equal(estimate.value, null);
+});
+
+test('provisional rates converge toward known unequal rates as clean independent 1 pp samples arrive', () => {
+  const qs = [quota(t, 0)], us = [];
+  let actualQuota = 0.5;
+  for (let i = 0; i < 60; i++) {
+    const at = t + (i + 1) * 60000;
+    if (i % 2 === 0) {
+      const size = i === 0 ? 300000 : 500000;
+      us.push(token(at - 1, { input: size * 0.8, cached: size * 0.4, output: size * 0.2, total: size }));
+      actualQuota += size / 1e6 * 2;
+    } else {
+      const size = i === 1 ? 137500 : 125000;
+      us.push(token(at - 1, { model: 'b', effort: 'max', tier: 'fast', input: size * 0.8, cached: size * 0.4, output: size * 0.2, total: size }));
+      actualQuota += size / 1e6 * 8;
+    }
+    qs.push(quota(at, Math.floor(actualQuota)));
+  }
+  const error = count => {
+    const r = calibrationReport(us, qs, qs[count]);
+    const p = r.provisional;
+    assert.equal(r.mode, count < 60 ? 'pending' : 'learned');
+    const aRate = p.group_rates[a], bRate = p.group_rates[b];
+    return Math.abs(aRate - 2) + Math.abs(bRate - 8);
+  };
+  const early = error(2), intermediate = error(8), mature = error(60);
+  assert.ok(mature < 1 && mature < intermediate && intermediate < early);
+});
+
+test('published coefficients match the held-out fit even when a small validation-period shift would change a refit', () => {
+  const rows = samples();
+  for (const row of rows.slice(30)) row.delta += 0.35;
+  const c = calibrate(rows, latest);
+  assert.equal(c.mode, 'learned');
+  const rates = Object.fromEntries(c.groups.map(g => [g.key, g.rates[0]]));
+  assert.ok(Math.abs(rates[a] - 2) < 0.01);
+  assert.ok(Math.abs(rates[b] - 8) < 0.01);
+  const error = rows.slice(30).reduce((total, o) => {
+    const fit = Object.entries(o.groups).reduce((n, [key, f]) => n + f.reduce((s, v) => s + v, 0) * rates[key], 0);
+    return total + Math.abs(fit - o.delta);
+  }, 0) / 10;
+  assert.ok(Math.abs(c.mae - error) < 1e-10);
+});
+
+test('a group with no current holdout exposure stays provisional regardless of pooled validation', () => {
+  const rows = samples();
+  for (const o of rows.slice(30)) {
+    o.groups = { [a]: [0.15, 0.30, 0.10] };
+    o.total = 0.55;
+    o.delta = 1.10;
+  }
+  const c = calibrate(rows.reverse(), latest);
+  assert.equal(c.mode, 'learned');
+  assert.deepEqual(c.groups.map(g => g.key), [a]);
+  assert.equal(c.validation_support[b].current, 0);
+  assert.match(c.unresolved_groups.find(g => g.key === b).reason, /本周期验证/);
+});
+
+test('a current error spike cannot be averaged away by otherwise accurate historical holdout rows', () => {
+  const rows = samples(84);
+  for (const row of rows.slice(0, -4)) row.reset_at -= 7 * DAY / 1000;
+  for (const row of rows.slice(-4)) row.delta += 2.5;
+  const c = calibrate(rows, latest);
+  assert.ok(c.mae < 1.25 && c.current_cycle_mae > 1.25);
+  assert.equal(c.mode, 'pending');
+});
+
+test('one independently observed model can pass absolute-error validation against its own shared rate', () => {
+  const rows = samples(32).map(o => {
+    const total = o.groups[a].reduce((s, n) => s + n, 0);
+    return { ...o, groups: { [a]: o.groups[a] }, delta: 8 * total, total };
+  });
+  const c = calibrate(rows, latest);
+  assert.equal(c.mode, 'learned');
+  assert.ok(Math.abs(c.groups[0].rates[0] - 8) < 0.01);
+});
+
+test('stale regressions and simultaneous conflicts cannot become a second charge', () => {
+  const qs = [quota(t, 10), quota(t + 100, 13), quota(t + 200, 11),
+    quota(t + 300, 14), quota(t + 400, 15), quota(t + 400, 18),
+    quota(t + 500, 18), quota(t + 600, 21)];
+  const u = [token(t + 50), token(t + 150), token(t + 250), token(t + 350), token(t + 550)];
+  const built = buildObservations(u, qs, qs.at(-1));
+  assert.deepEqual(built.observations.map(o => [o.start, o.end, o.delta]), [[t, t + 100, 3], [t + 500, t + 600, 3]]);
+  assert.equal(built.skipped.conflict, 1);
+  assert.equal(built.skipped.backwards, 1);
+});
+
+test('missing lifetime coverage and a plan change break intervals even when their update points fall elsewhere', () => {
+  const qs = [quota(t, 10), quota(t + 100, 13), quota(t + 130, 16, { plan: 'different' }),
+    quota(t + 170, 16), quota(t + 240, 19)];
+  const us = [token(t + 70), token(t + 150), token(t + 200)];
+  const o = buildObservations(us, qs, qs.at(-1), { missingRanges: [{ start: t + 20, end: t + 120 }] });
+  assert.deepEqual(o.observations.map(b => b.start), [t + 170]);
+  assert.equal(o.skipped.missing, 1);
+  assert.equal(o.planCutoff, t + 170);
+  const r = calibrationReport(us, qs, qs.at(-1));
+  assert.equal(estimateRows([us[0]], r).value, null);
+  assert.equal(estimateRows([us[2]], r).status, 'provisional');
+});
 test('interval progress reports partial quota movement and resets at cycle boundaries',()=>{
  const qs=[quota(t,0),quota(t+60000,2)],c=buildObservations([token(t+1)],qs,latest);
  assert.equal(c.progress.interval_accumulated_pp,2);assert.equal(c.progress.interval_required_pp,3);assert.equal(c.observations.length,0);

@@ -67,7 +67,7 @@ sealed partial class MonitorApp : IDisposable
 
         var schemas = new Dictionary<string, string> {
             ["Live"]="Title Subtitle Tooltip State Tone Rate Elapsed", ["Session"]="Title Subtitle Tooltip Indent Chevron Week Estimate",
-            ["Model"]="Title Subtitle Week Estimate Samples", ["Process"]="Title Subtitle Tooltip Indent Pid Memory",
+            ["Model"]="Title Subtitle Week UsageShare Estimate Samples", ["Process"]="Title Subtitle Tooltip Indent Pid Memory",
             ["DetailFacts"]="Label Value", ["SessionFacts"]="Label Value", ["Commands"]="Title Subtitle Tooltip State Duration",
             ["SessionModels"]="Title Subtitle Tooltip Total", ["Daily"]="Day Total", ["Relations"]="Title Subtitle Tooltip Other"
         };
@@ -293,7 +293,9 @@ sealed partial class MonitorApp : IDisposable
     {
         U<ColumnDefinition>("SidebarColumn").Width = new(main.ActualWidth < 1220 ? 184 : 208);
         SetDetails(details);
-        U<FrameworkElement>("QuotaFill").Width = U<FrameworkElement>("QuotaTrack").ActualWidth * Math.Clamp(snapshot.J("quota").N("used_percent"), 0, 100) / 100;
+        var quota = snapshot.J("quota");
+        U<FrameworkElement>("QuotaFill").Width = quota.B("conflict") ? 0
+            : U<FrameworkElement>("QuotaTrack").ActualWidth * Math.Clamp(quota.N("used_percent"), 0, 100) / 100;
         if (chartRow.Valid()) RenderTrend(chartRow);
     }
     void ShowPage(string name)
@@ -322,9 +324,11 @@ sealed partial class MonitorApp : IDisposable
         }
         ApplySpeed(data);
         var q = data.J("quota"); var c = data.J("coverage");
-        Text("QuotaValue", q.J("used_percent").Number() is double n ? $"{n:0}% 已用" : "未知");
-        Text("QuotaStamp", q.B("expired") ? "快照已过期" : q.N("at_ms") > 0 ? "快照 " + q.Stamp("at_ms") : "尚无账户快照");
-        U<TextBlock>("QuotaStamp").ToolTip = "账户配额快照；重置：" + Date(q.N("reset_at") * 1000);
+        Text("QuotaValue", !q.B("conflict") && q.J("used_percent").Number() is double n ? $"{n:0}% 已用" : "未知");
+        Text("QuotaStamp", q.B("conflict") ? "快照待核对" : q.B("expired") ? "快照已过期"
+            : q.N("at_ms") > 0 ? "快照 " + q.Stamp("at_ms") : "尚无账户快照");
+        U<TextBlock>("QuotaStamp").ToolTip = q.B("conflict") ? q.S("conflict_reason")
+            : "配额重置时间 " + Date(q.N("reset_at") * 1000);
         var total = data.N("week_total");
         Text("WeekUsage", "本机周期 " + (total >= 1e6 ? $"{total / 1e6:0.00} M" : total >= 1e3 ? $"{total / 1e3:0.0} K" : data.Count("week_total")) + " token");
         U<TextBlock>("WeekUsage").ToolTip = $"周期 {data.J("period").Stamp("start")} — {data.J("period").Stamp("end")}（北京时间）";
@@ -374,13 +378,13 @@ sealed partial class MonitorApp : IDisposable
         var dialog = new Microsoft.Win32.SaveFileDialog { Filter = "CSV 文件 (*.csv)|*.csv", FileName = $"Codex用量-{DateTime.Now:yyyyMMdd}.csv" };
         if (dialog.ShowDialog(main) != true) return;
         using var writer = new StreamWriter(dialog.FileName, false, new UTF8Encoding(true));
-        writer.WriteLine("会话ID,标题,类型,累计token,逐条累计token,周期token,缓存输入token,输出token,本机周期占比,周配额校准占比,校准状态,token分摊参考,完整性,周期开始北京时间,周期结束北京时间,配额快照北京时间");
+        writer.WriteLine("会话ID,标题,类型,累计token,逐条累计token,周期token,缓存输入token,输出token,本机周期占比,周配额估算,估算状态,本机加权占比,计权token,完整性,周期开始北京时间,周期结束北京时间,配额快照北京时间");
         foreach (var s in sessions.Values)
         {
             string title = s.S("title");
             if (title.Length > 0 && "=+@-\t\r".Contains(title[0])) title = "'" + title;
             var fields = new[] { IdOf(s),title,Kind(s.S("source")),s.S("total"),s.S("recorded"),s.B("week_known") ? s.S("week_total") : "未知",
-                s.S("cached"),s.S("output"),s.S("local_share"),s.S("quota_estimate"),snapshot.J("calibration").S("reason"),s.S("quota_allocation"),Coverage(s),
+                s.S("cached"),s.S("output"),s.S("local_share"),s.S("quota_estimate"),s.EstimateStatus(),s.S("local_weighted_share"),s.S("credit_reference_tokens"),Coverage(s),
                 snapshot.J("period").Stamp("start"),snapshot.J("period").Stamp("end"),snapshot.J("quota").Stamp("at_ms") };
             writer.WriteLine(string.Join(",", fields.Select(x => "\"" + x.Replace("\"", "\"\"") + "\"")));
         }

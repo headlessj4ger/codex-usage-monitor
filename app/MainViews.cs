@@ -38,8 +38,13 @@ sealed partial class MonitorApp
                     var combinations = snapshot.A("combinations");
                     var cal = snapshot.J("calibration");
                     tables[page].Sync(combinations.Select(g => Row(g.S("key"), ("Title", g.S("model")), ("Subtitle", $"{g.Effort()} 思考 · {g.Tier()}"),
-                        ("Week", g.Count("week_total")), ("Estimate", g.Estimate()), ("Samples", g.Count("calibration_samples")))));
-                    Text("PageSubtitle", $"{combinations.Length} 个模型组合 · {cal.S("reason")}");
+                        ("Week", g.Count("week_total")), ("UsageShare", g.CycleShare("used")),
+                        ("Estimate", g.CycleShare("total")), ("Samples", g.Count("calibration_samples")))));
+                    var preview = cal.J("provisional");
+                    var estimateMode = cal.S("mode") == "learned" ? cal.S("reason")
+                        : preview.S("basis") == "interval" ? "暂估已更新"
+                        : combinations.Any(g => g.J("cycle_share").S("basis") == "weighted") ? "按计费权重暂估" : cal.S("reason");
+                    Text("PageSubtitle", $"{combinations.Length} 个模型组合 · {estimateMode}");
                     Text("ContextNote", Progress(cal)); U<TextBlock>("ContextNote").ToolTip = Progress(cal) + "\n" + Filters(cal);
                     break;
                 case "Process":
@@ -165,14 +170,16 @@ sealed partial class MonitorApp
         var c = snapshot.J("calibration");
         Facts("SessionFacts", ("自身累计 token",s.Count("total")), ("数据完整性", Coverage(s)),
             ("逐条累计 token", s.Count("recorded")), ("自身周期 token", s.B("week_known") ? s.Count("week_total") : "未知：缺少带时间戳日志"),
-            ("本机周期占比", s.B("week_known") ? s.Pct("local_share") : "—"), ("周配额校准占比", s.Estimate()),
-            ("校准状态", (!s.J("quota_estimate").Valid() && c.S("mode") == "learned" ? "含尚未校准的组合" : c.S("reason")) + "；截至 " + c.Stamp("as_of")),
-            ("token 分摊参考", s.Pct("quota_allocation") + "；原始比例，未考虑模型差异"), ("输入 token",s.Count("input")), ("其中缓存输入",s.Count("cached")),
+            ("本机周期占比", s.B("week_known") ? s.Pct("local_share") : "—"), ("周配额估算", s.Estimate()),
+            ("估算状态", s.EstimateStatus() + " · 截至 " + c.Stamp("as_of")),
+            ("本机加权占比", s.Pct("local_weighted_share")), ("输入 token",s.Count("input")), ("其中缓存输入",s.Count("cached")),
             ("输出 token",s.Count("output")), ("其中推理输出",s.Count("reasoning")), ("自身 + 子树累计", $"{family.Sum(x=>x.N("total")):N0} / {family.Count} 个会话"),
             ("自身 + 子树周期",$"{family.Sum(x=>x.N("week_total")):N0}（已记录部分）"), ("最近模型",s.S("model")), ("已记录响应",s.Count("requests")),
             ("已索引命令",s.Count("commands")), ("最后活动",s.Stamp("updated")), ("工作目录",s.S("cwd")));
     }
-    static string Coverage(JsonElement s) => s.S("coverage") switch { "records" => "逐条用量", "metadata" => "仅累计快照", _ => "部分日志 + 累计快照" };
+    static string Coverage(JsonElement s) => s.S("coverage") switch {
+        "records" => "逐条用量", "metadata" => "仅累计快照", "inherited" => "缺少自身用量记录", _ => "用量记录不完整"
+    };
 
     void ApplyDetail(JsonElement d)
     {
@@ -191,10 +198,11 @@ sealed partial class MonitorApp
         }));
     }
 
-    static string Progress(JsonElement c) => $"本周验证 {c.Count("current_cycle_holdout")} / 3 · 下一区间 {c.J("progress").N("interval_accumulated_pp"):0.#} / 3 百分点 · 有效 {c.Count("observations")} 区间";
+    static string Progress(JsonElement c) =>
+        $"历史 {c.J("fit_progress").N("historical"):0} · 本周期 {c.J("fit_progress").N("current"):0} · 验证 {c.N("current_cycle_holdout"):0} / {Math.Max(3, c.J("requirements").N("current_cycle_holdout")):0}";
     static string Filters(JsonElement c) {
         var s = c.J("skipped");
-        return $"缺日志区间 {s.Count("missing")}；上下文不全区间 {s.Count("unknown")}；间隔过长 {s.Count("gap")} 次；快照回退 {s.Count("backwards")} 次";
+        return $"缺日志 {s.Count("missing")} 区间 · 上下文不全 {s.Count("unknown")} 区间 · 间隔过长 {s.Count("gap")} 次 · 快照回退 {s.Count("backwards")} 次";
     }
     void RenderModel(JsonElement g)
     {
@@ -202,25 +210,38 @@ sealed partial class MonitorApp
         var c = snapshot.J("calibration");
         DetailHeader("模型 / 自动校准",g.S("model"),$"{g.Effort()} 思考 · {g.Tier()}");
         var current = g.J("rate").Valid();
-        var rate = current ? g.J("rate") : g.J("historical_rate");
-        var state = current ? "当前周期验证通过" : g.S("calibration_warning") is {Length: >0} warn ? warn : rate.Valid() ? "历史系数已保留；当前周期验证中" :
-            g.S("effort") == "unknown" || g.S("model") == "unknown" ? "历史上下文缺失，无法回填" :
-            g.N("calibration_samples") == 0 ? "尚无符合条件的区间" : c.S("mode") == "learned" ? "此组合样本不足，继续积累" : c.S("reason");
+        var rate = g.J("rate");
+        var previousRate = g.J("historical_rate");
+        var previewRate = g.J("provisional_rate").Number();
+        var groupSupport = c.J("validation_support").J(g.S("key"));
+        var state = current ? "当前周期验证通过" : g.S("calibration_warning") is { Length: > 0 } warn ? warn :
+            g.S("effort") == "unknown" || g.S("model") == "unknown" || g.S("tier") == "unknown" ? "组合维度未记录" :
+            g.N("calibration_samples") == 0 ? "尚未收集到此组合的正式验证样本" :
+            c.S("mode") == "learned" ? "继续积累此组合的样本" : c.S("reason");
+        string Coefficient(JsonElement model) =>
+            string.Join(" / ", model.A("rates").Select(r => $"{r.Number():0.####}")) + " 百分点 / 百万 token";
+        var coefficient = current ? Coefficient(rate)
+            : previewRate is double n ? $"{n:0.####} 百分点 / 百万 token" : "等待组合样本";
+        var basis = current ? (rate.B("channel_model") ? "未缓存输入 / 缓存输入 / 输出" : "组合总 token")
+            : previewRate is not null ? "此组合暂估" : "待校准";
         string ErrorOf(string key) => c.J(key).Valid() ? $"{c.N(key):0.00} 个百分点" : "等待本周期验证";
         var history = c.J("historical");
-        Facts("DetailFacts", ("本周期 token",g.Count("week_total")), ("周配额校准占比",g.Estimate()), ("组合校准状态",state), ("当前学习进度",Progress(c)),
-            ("组合有效区间",g.Count("calibration_samples")), ("本周校准区间",$"已收集 {c.J("progress").Count("current_cycle_observations")}；可用于验证 {c.Count("current_cycle_holdout")}"),
+        Facts("DetailFacts", ("本周期 token",g.Count("week_total")),
+            ("周期用量占比",g.CycleShare("used")), ("周期总量占比",g.CycleShare("total")),
+            ("占比依据",g.J("cycle_share").EstimateStatus("basis")), ("周配额系数",coefficient), ("系数依据",basis),
+            ("计费参考权重",g.J("credit_reference_rate").Number() is double weight ? $"{weight:0.##} 积分 / 百万 token" : "—"),
+            ("本机加权占比",g.Pct("local_weighted_share")),
+            ("组合验证状态",state), ("当前学习进度",Progress(c)), ("此组合暂估区间",g.Count("provisional_samples")),
+            ("此组合本周验证",$"{groupSupport.N("current"):0} 区间 · {groupSupport.N("informative"):0} 个有足够用量"), ("组合有效区间",g.Count("calibration_samples")),
             ("少见组合混用",c.Count("excluded_sparse") + " 个区间暂不用于拟合"),
-            (!current && rate.Valid() ? "历史系数（参考）" : "当前采用系数",rate.Valid() ? string.Join(" / ",rate.A("rates").Select(r=>$"{r.Number():0.0000}"))+" 配额百分点 / 百万 token" : "尚无可靠系数"),
-            ("换算口径",!rate.Valid() ? "等待可识别的模型组合" : rate.B("channel_model") ? "未缓存 / 缓存 / 输出" : "组合总 token"),
             ("全局训练 / 验证",$"{c.Count("train")} / {c.Count("holdout")} 个区间；近 {c.S("history_days")} 天"), ("本次验证误差", ErrorOf("mae")), ("统一换算误差",ErrorOf("baseline_mae")),
-            ("历史验证时间",history.Stamp("as_of")), ("历史验证误差",history.Valid()? history.Rate("mae")+" 个百分点；仅供参考":"—"),
+            ("历史系数", previousRate.Valid() ? Coefficient(previousRate) : "—"), ("历史验证时间",previousRate.Valid() ? history.Stamp("as_of") : "—"),
             ("数据过滤记录",Filters(c)), ("已校准 token 覆盖",c.N("eligible_tokens")>0?$"{100*c.N("covered_tokens")/c.N("eligible_tokens"):0.00}%":"—"),
             ("配额快照时间",c.Stamp("as_of")), ("历史累计 token",g.Count("total")), ("周期未缓存输入",g.Count("week_uncached")),
             ("周期缓存输入",g.Count("week_cached")), ("周期输出",g.Count("week_output")), ("其中推理输出",g.Count("week_reasoning")),
             ("周期 / 累计响应",$"{g.Count("week_requests")} / {g.Count("requests")}"), ("账户快照差值",ErrorOf("unexplained_quota")),
             ("套餐上下文",c.B("plan_unknown")?"日志未记录套餐；变更后需重新验证":"已记录"),
-            ("估算说明","每个有效区间至少累计 3 个配额百分点。新周期需 3 个验证区间，并通过误差检查。历史系数保留作参考；新模型独立积累样本。"));
+            ("估算说明","≈ 表示暂估。配额区间会自动更新系数。组合积累独立样本并通过留出验证后，显示已验证估算。"));
     }
     void RenderProcess(JsonElement p)
     {
