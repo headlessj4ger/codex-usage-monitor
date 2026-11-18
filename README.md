@@ -10,14 +10,14 @@ PowerShell 策略须允许运行本地脚本。若设备由组织管理且禁止
 
 ### 下载完整 ZIP
 
-从 [最新发行版](https://github.com/headlessj4ger/codex-usage-monitor/releases/latest) 下载 `CodexUsageMonitor-2.7.0-win-x64.zip`，完整解压到可写目录，双击 `Start.cmd`。无需预装 Node.js 或 npm。`Demo.cmd` 可以查看模拟会话与全部动效。
+下载 `CodexUsageMonitor-2.8.0-win-x64.zip`，完整解压到可写目录，双击 `Start.cmd`。包内已带采集器运行时。`Demo.cmd` 可以查看模拟会话和动效。[最新发行版](https://github.com/headlessj4ger/codex-usage-monitor/releases/latest)
 
 ### 通过 npm 安装完整包
 
 已有 Node.js 18+ 和 npm 的 Windows x64 用户，在终端运行：
 
 ```powershell
-npm install -g https://github.com/headlessj4ger/codex-usage-monitor/releases/download/v2.7.0/codex-usage-monitor-2.7.0.tgz
+npm install -g https://github.com/headlessj4ger/codex-usage-monitor/releases/download/v2.8.0/codex-usage-monitor-2.8.0.tgz
 codex-usage-monitor
 ```
 
@@ -43,6 +43,8 @@ codex-usage-monitor data-path  # 查看统计数据位置
 | 完整 ZIP | 程序目录下 `data/usage-v2.sqlite` | 程序目录下 `settings.json` |
 | npm | `%LOCALAPPDATA%\CodexUsageMonitor\usage-v2.sqlite` | 同一目录下 `settings.json` |
 
+升级便携版时，先从托盘退出程序，再将新包解压覆盖原目录的程序文件。保留原目录下的 `data/` 和 `settings.json`，即可继续使用已有统计和设置。
+
 可用绝对路径环境变量 `CODEX_MONITOR_DATA` 指定独立的数据目录。npm 升级不会覆盖该目录。升级前从托盘退出程序，再执行新版本的安装命令。卸载前关闭程序内的开机启动，再退出程序，执行 `npm uninstall -g codex-usage-monitor`；个人统计数据保留，按需自行删除。
 
 程序只读 Codex 的本地数据，不读取登录凭据 `auth.json`。运行时采集不上传会话数据；从源码安装且缺少运行时时，安装器仅连接 `nodejs.org` 下载固定版本。
@@ -51,7 +53,7 @@ codex-usage-monitor data-path  # 查看统计数据位置
 
 - 速率为最近 1 分钟已入账输出 token 的均值，输出包含推理 token；柱形每根覆盖 30 秒。Codex 通常在响应结束后写入用量，因此它反映完成响应的吞吐，不是逐字流式速度。
 - 每个会话默认只计算自身用量，详情另列子树合计。
-- 周配额来自本机日志中的账户快照；逐会话占比按模型、思考深度和服务档位自动学习，样本和验证通过后才启用。
+- 模型表显示周期用量占比和周期总量占比。程序先按本机计费权重给出暂估，再根据账户配额变化自动校正各模型组合。点击组合可查看估算依据和验证进度。
 - 状态变化监听本地文件并每秒补查，及时程度取决于 Codex 何时写出记录。支持已验证的异步问题提醒，客户端权限审批的内存状态尚未接入。
 - 完成、失败和中断行保留到本地确认或客户端已读；点击可打开对应 Codex 会话。
 

@@ -30,7 +30,7 @@ $window.Icon=New-Object Windows.Media.Imaging.BitmapImage([Uri](Join-Path $baseD
 $ui.AppLogo.Source=New-Object Windows.Media.Imaging.BitmapImage([Uri](Join-Path $baseDir 'assets/logo.png'))
 $area=[Windows.SystemParameters]::WorkArea;$window.Width=[Math]::Min(1440,$area.Width-60);$window.Height=[Math]::Min(900,$area.Height-60)
 $script:tables=@{}
-$schemas=@{Live=@('Title','Subtitle','Tooltip','State','Tone','Rate','Elapsed');Session=@('Title','Subtitle','Tooltip','Indent','Chevron','Week','Estimate');Model=@('Title','Subtitle','Week','Estimate','Samples');Process=@('Title','Subtitle','Tooltip','Indent','Pid','Memory');DetailFacts=@('Label','Value');SessionFacts=@('Label','Value');Commands=@('Title','Subtitle','Tooltip','State','Duration');SessionModels=@('Title','Subtitle','Tooltip','Total');Daily=@('Day','Total');Relations=@('Title','Subtitle','Tooltip','Other')}
+$schemas=@{Live=@('Title','Subtitle','Tooltip','State','Tone','Rate','Elapsed');Session=@('Title','Subtitle','Tooltip','Indent','Chevron','Week','Estimate');Model=@('Title','Subtitle','Week','UsageShare','Estimate','Samples');Process=@('Title','Subtitle','Tooltip','Indent','Pid','Memory');DetailFacts=@('Label','Value');SessionFacts=@('Label','Value');Commands=@('Title','Subtitle','Tooltip','State','Duration');SessionModels=@('Title','Subtitle','Tooltip','Total');Daily=@('Day','Total');Relations=@('Title','Subtitle','Tooltip','Other')}
 foreach($key in $schemas.Keys){$tables[$key]=New-StateTable $schemas[$key];$target=if($key -like '*Facts'){$key}else{$key+'Grid'};$ui[$target].ItemsSource=$tables[$key].DefaultView}
 $ui.RefreshChoice.SelectedIndex=[array]::IndexOf($refreshValues,$refreshSeconds);$ui.SessionOrder.SelectedIndex=0
 $ui.RefreshChoice.ToolTip='完整统计的采样间隔。状态随本地记录变化更新；仅手动会暂停全部自动采集。'
@@ -59,7 +59,7 @@ function Start-Collector {
     $taskNode=Join-Path $baseDir 'runtime/node.exe';if(-not (Test-Path -LiteralPath $taskNode)){$taskNode=(Get-Command node.exe -ErrorAction Stop).Source}
     $dataDir=if($SelfTest){Join-Path $DiagnosticDir 'cache'}else{$storage.Data}
     $psi=New-Object Diagnostics.ProcessStartInfo;$psi.FileName=$taskNode
-    $psi.Arguments='--no-warnings "'+(Join-Path $baseDir 'collector.cjs')+'" --interval '+(Get-EffectiveInterval)+' --data "'+$dataDir+'"'
+    $psi.Arguments='--no-warnings "'+(Join-Path $baseDir 'collector.cjs')+'" --interval '+(Get-EffectiveInterval)+' --data "'+$dataDir+'" --process-sampler "'+(Join-Path $baseDir 'sample-processes.ps1')+'"'
     $psi.WorkingDirectory=$baseDir;$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardInput=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
     $psi.StandardOutputEncoding=[Text.Encoding]::UTF8;$psi.StandardErrorEncoding=[Text.Encoding]::UTF8
     $script:backend=New-Object Diagnostics.Process;$backend.StartInfo=$psi;[void]$backend.Start()
@@ -81,7 +81,8 @@ function Set-Details([bool]$show) {
 function Update-Size {
     $ui.SidebarColumn.Width=New-Object Windows.GridLength($(if($window.ActualWidth -lt 1220){184}else{208}))
     Set-Details $script:detailsVisible
-    $ui.QuotaFill.Width=[Math]::Max(0,$ui.QuotaTrack.ActualWidth*[Math]::Min(100,[Math]::Max(0,[double]$script:snapshot.quota.used_percent))/100)
+    $used=if($script:snapshot.quota.conflict){0}else{[double]$script:snapshot.quota.used_percent}
+    $ui.QuotaFill.Width=[Math]::Max(0,$ui.QuotaTrack.ActualWidth*[Math]::Min(100,[Math]::Max(0,$used))/100)
     if($script:chartRow){Render-Trend $script:chartRow}
 }
 function Show-Page([string]$name) {
@@ -103,10 +104,25 @@ function Render-Page {
                 });Sync-StateTable $tables.Live $rows
                 $ui.PageSubtitle.Text=$rows.Count.ToString()+' 个会话 · 输出含推理 token';$ui.PageSubtitle.ToolTip='每行仅计会话自身。速率按响应入账时间计算，非逐 token 生成速度。'
             }
-            'Session'{Sync-StateTable $tables.Session @(Get-SessionRows);$ui.PageSubtitle.Text=$tables.Session.Rows.Count.ToString()+' 行 · '+$(if($ui.SessionOrder.SelectedIndex -eq 0){'按会话关联展开'}else{'所有会话用量排名'});$ui.PageSubtitle.ToolTip='周期 token 是已记录的本机用量；校准占比是账户周配额的估算占比。'}
+            'Session'{Sync-StateTable $tables.Session @(Get-SessionRows);$ui.PageSubtitle.Text=$tables.Session.Rows.Count.ToString()+' 行 · '+$(if($ui.SessionOrder.SelectedIndex -eq 0){'按会话关联展开'}else{'所有会话用量排名'});$ui.PageSubtitle.ToolTip='周期 token 是已记录的本机用量。≈ 表示未验证的估算，计算依据见详情。'}
             'Model'{
-                Sync-StateTable $tables.Model @(foreach($g in $d.combinations){@{Id=$g.key;Title=$g.model;Subtitle=(Format-Effort $g.effort)+' 思考 · '+(Format-Tier $g.tier);Week=(Format-Count $g.week_total);Estimate=(Format-Estimate $g.quota_estimate $g.week_total);Samples=(Format-Count $g.calibration_samples)}})
-                $ui.PageSubtitle.Text=$d.combinations.Count.ToString()+' 个模型组合 · '+$d.calibration.reason;$ui.ContextNote.Text=Format-CalibrationProgress $d.calibration;$ui.ContextNote.ToolTip=(Format-CalibrationProgress $d.calibration)+"`n"+(Format-CalibrationFilters $d.calibration)
+                Sync-StateTable $tables.Model @(foreach($g in $d.combinations){
+                    @{
+                        Id=$g.key;Title=$g.model;Subtitle=(Format-Effort $g.effort)+' 思考 · '+(Format-Tier $g.tier)
+                        Week=(Format-Count $g.week_total)
+                        UsageShare=(Format-Estimate $g.cycle_share.used $g.week_total $g.cycle_share.basis)
+                        Estimate=(Format-Estimate $g.cycle_share.total $g.week_total $g.cycle_share.basis)
+                        Samples=(Format-Count $g.calibration_samples)
+                    }
+                })
+                $summary=$d.calibration.reason
+                if($d.calibration.mode -ne 'learned'){
+                    if($d.calibration.provisional.basis -eq 'interval'){$summary='暂估已更新'}
+                    elseif(@($d.combinations|Where-Object {$_.cycle_share.basis -eq 'weighted'}).Count){$summary='按计费权重暂估'}
+                }
+                $ui.PageSubtitle.Text=$d.combinations.Count.ToString()+' 个模型组合 · '+$summary
+                $ui.ContextNote.Text=Format-CalibrationProgress $d.calibration
+                $ui.ContextNote.ToolTip=$ui.ContextNote.Text+"`n"+(Format-CalibrationFilters $d.calibration)
             }
             'Process'{Sync-StateTable $tables.Process @(Get-ProcessRows);$ui.PageSubtitle.Text=$d.processes.Count.ToString()+' 个相关进程 · 保留系统父子关系';$ui.ContextNote.Text='采样 '+(Format-Time $d.process_at)+$(if($d.process_error){' · '+$d.process_error}else{' · 会话归属按明确标识匹配'});$ui.ContextNote.ToolTip='自动采样至少间隔 15 秒；Codex 执行编号不是 Windows PID。'+$d.process_error}
         }
@@ -119,9 +135,9 @@ function Render-Snapshot($data) {
     foreach($s in $data.sessions){$script:sessions[$s.id]=$s};foreach($s in $data.speed.rows){$s|Add-Member -NotePropertyName mini_visible -NotePropertyValue $false -Force;$script:speedRows[$s.id]=$s}
     foreach($s in $data.speed.activity){$s|Add-Member -NotePropertyName mini_visible -NotePropertyValue $true -Force;$script:speedRows[$s.id]=$s}
     $ui.LiveCount.Text=[string]@($data.speed.rows|Where-Object {$_.is_open -and -not $_.long_stale -and $_.source -ne 'guardian_review'}).Count
-    $ui.QuotaValue.Text=if($null -ne $data.quota.used_percent){('{0:0}%' -f $data.quota.used_percent)+' 已用'}else{'未知'}
-    $ui.QuotaStamp.Text=if($data.quota.expired){'快照已过期'}elseif($data.quota.at_ms){'快照 '+(Format-Time $data.quota.at_ms)}else{'尚无账户快照'}
-    $ui.QuotaStamp.ToolTip='账户配额快照；不等于本机所有 token 的线性换算。重置：'+(Format-Time ($data.quota.reset_at*1000))
+    $ui.QuotaValue.Text=if(-not $data.quota.conflict -and $null -ne $data.quota.used_percent){('{0:0}%' -f $data.quota.used_percent)+' 已用'}else{'未知'}
+    $ui.QuotaStamp.Text=if($data.quota.conflict){'快照待核对'}elseif($data.quota.expired){'快照已过期'}elseif($data.quota.at_ms){'快照 '+(Format-Time $data.quota.at_ms)}else{'尚无账户快照'}
+    $ui.QuotaStamp.ToolTip=if($data.quota.conflict){$data.quota.conflict_reason}else{'配额重置时间 '+(Format-Time ($data.quota.reset_at*1000))}
     $ui.WeekUsage.Text='本机周期 '+(Format-Short $data.week_total)+' token';$ui.WeekUsage.ToolTip='周期 '+(Format-Time $data.period.start)+' — '+(Format-Time $data.period.end)+'（北京时间）'
     $ui.ConnectionText.Text='本地采集 · '+(Format-Time $data.last_scan).Substring(6);$ui.ConnectionDot.Fill=(Theme-Color 'Accent')
     $ui.StatusText.Text=$data.coverage.sessions.ToString()+' 个会话 · '+$data.coverage.with_logs+' 个有日志 · '+$data.coverage.metadata_only+' 个仅累计快照'+$(if($data.warnings.Count){' · '+$data.warnings.Count+' 条日志提示'})
@@ -203,16 +219,19 @@ function Fill-Session($s) {
     $parents=Get-Parents;$family=@{};$family[$s.id]=$true;$changed=$true
     while($changed){$changed=$false;foreach($id in $parents.Keys){if($family.ContainsKey($parents[$id]) -and -not $family.ContainsKey($id)){$family[$id]=$true;$changed=$true}}}
     $total=0;$week=0;foreach($id in $family.Keys){$total+=$script:sessions[$id].total;$week+=$script:sessions[$id].week_total}
-    $estimateNote=if($null -eq $s.quota_estimate -and $snapshot.calibration.mode -eq 'learned'){'含尚未校准的组合'}else{$snapshot.calibration.reason}
+    $estimateNote=Format-EstimateStatus $s.quota_estimate_status
+    if($s.quota_unlisted_model_tokens -gt 0){
+        $estimateNote=if($s.quota_eligible_tokens){$estimateNote+' · 仅目录内模型'}else{'未纳入模型估算'}
+    }
     Sync-StateTable $tables.SessionFacts @(
         (Fact 'total' '自身累计 token' (Format-Count $s.total))
         (Fact 'coverage' '数据完整性' (Get-Coverage $s.coverage))
         (Fact 'recorded' '逐条累计 token' (Format-Count $s.recorded))
         (Fact 'week' '自身周期 token' $(if($s.week_known){Format-Count $s.week_total}else{'未知：缺少带时间戳日志'}))
         (Fact 'share' '本机周期占比' $(if($s.week_known){Format-Percent $s.local_share}else{'—'}))
-        (Fact 'estimate' '周配额校准占比' (Format-Estimate $s.quota_estimate $s.week_total))
-        (Fact 'calstate' '校准状态' ($estimateNote+'；截至 '+(Format-Time $snapshot.calibration.as_of)))
-        (Fact 'allocation' 'token 分摊参考' ((Format-Percent $s.quota_allocation)+'；原始比例，未考虑模型差异'))
+        (Fact 'estimate' '周配额估算' (Format-SessionEstimate $s))
+        (Fact 'calstate' '估算状态' ($estimateNote+' · 截至 '+(Format-Time $snapshot.calibration.as_of)))
+        (Fact 'weightedshare' '本机加权占比' (Format-Percent $s.local_weighted_share))
         (Fact 'input' '输入 token' (Format-Count $s.input))
         (Fact 'cached' '其中缓存输入' (Format-Count $s.cached))
         (Fact 'output' '输出 token' (Format-Count $s.output))
@@ -233,30 +252,55 @@ function Apply-Detail($detail) {
     Sync-StateTable $tables.Daily @(foreach($day in $detail.daily){@{Id=$day.day;Day=$day.day;Total=(Format-Count $day.total)}})
     Sync-StateTable $tables.Relations @(foreach($edge in $detail.edges){$out=$edge.parent_id -eq $detail.id;$other=if($out){$edge.child_id}else{$edge.parent_id};$title=if($script:sessions.ContainsKey($other)){$script:sessions[$other].title}else{$other};@{Id=$edge.parent_id+'|'+$edge.child_id+'|'+$edge.kind;Other=$other;Title=(Clean-Title $title);Subtitle=$(if($out){'关联到 · '}else{'来自 · '})+(Get-Kind $edge.kind);Tooltip=$edge.evidence+"`n"+$other}})
 }
-function Format-CalibrationProgress($c) { return '本周验证 '+(Format-Count $c.current_cycle_holdout)+' / 3 · 下一区间 '+('{0:0.#}' -f [double]$c.progress.interval_accumulated_pp)+' / 3 百分点 · 有效 '+(Format-Count $c.observations)+' 区间' }
-function Format-CalibrationFilters($c) { return '缺日志区间 '+(Format-Count $c.skipped.missing)+'；上下文不全区间 '+(Format-Count $c.skipped.unknown)+'；间隔过长 '+(Format-Count $c.skipped.gap)+' 次；快照回退 '+(Format-Count $c.skipped.backwards)+' 次' }
+function Format-CalibrationProgress($c) {
+    $required=[int]$c.requirements.current_cycle_holdout
+    if($required -le 0){$required=3}
+    return '历史 '+[int]$c.fit_progress.historical+' · 本周期 '+[int]$c.fit_progress.current+' · 验证 '+[int]$c.current_cycle_holdout+' / '+$required
+}
+function Format-CalibrationFilters($c) {
+    $filterNote='目录外模型 '+[int]$c.skipped.unlisted_model+' 区间 · 缺日志 '+[int]$c.skipped.missing+' 区间 · 上下文不全 '+[int]$c.skipped.unknown+' 区间 · 间隔过长 '+[int]$c.skipped.gap+' 次 · 快照回退 '+[int]$c.skipped.backwards+' 次'
+    if($c.provisional_warning){$filterNote+=[Environment]::NewLine+$c.provisional_warning}
+    return $filterNote
+}
 function Render-Model([string]$id) {
     $g=$snapshot.combinations|Where-Object {$_.key -eq $id}|Select-Object -First 1;if(-not $g){return};$c=$snapshot.calibration
     Set-DetailHeader '模型 / 自动校准' $g.model ((Format-Effort $g.effort)+' 思考 · '+(Format-Tier $g.tier))
-    $shown=if($g.rate){$g.rate}else{$g.historical_rate}
-    $rateText=if($shown){(@($shown.rates|ForEach-Object {'{0:0.0000}' -f $_}) -join ' / ')+' 配额百分点 / 百万 token'}else{'尚无可靠系数'}
-    $rateKind=if(-not $shown){'等待可识别的模型组合'}elseif($shown.channel_model){'未缓存 / 缓存 / 输出'}else{'组合总 token'}
-    $rateState=if($g.rate){'当前周期验证通过'}elseif($g.calibration_warning){$g.calibration_warning}elseif($g.historical_rate){'历史系数已保留；当前周期验证中'}elseif($g.effort -eq 'unknown' -or $g.model -eq 'unknown'){'历史上下文缺失，无法回填'}elseif(-not $g.calibration_samples){'尚无符合条件的区间'}elseif($c.mode -eq 'learned'){'此组合样本不足，继续积累'}else{$c.reason}
+    $support=if($c.validation_support){$c.validation_support.PSObject.Properties[[string]$g.key].Value}
+    $rateText='等待组合样本'
+    $rateKind='待校准'
+    if($g.rate){
+        $rateText=(@($g.rate.rates|ForEach-Object {'{0:0.####}' -f $_}) -join ' / ')+' 百分点 / 百万 token'
+        $rateKind=if($g.rate.channel_model){'未缓存输入 / 缓存输入 / 输出'}else{'组合总 token'}
+    }elseif($null -ne $g.provisional_rate){
+        $rateText='{0:0.####} 百分点 / 百万 token' -f $g.provisional_rate
+        $rateKind='配额区间拟合 · 暂估'
+    }
+    $weightText=if($null -ne $g.credit_reference_rate){'{0:0.##} 积分 / 百万 token' -f $g.credit_reference_rate}else{'—'}
+    $rateState=if($g.rate){'当前周期验证通过'}elseif($g.calibration_warning){$g.calibration_warning}elseif('unknown' -in @($g.model,$g.effort,$g.tier)){'组合维度未记录'}elseif(-not $g.calibration_samples){'尚未收集到此组合的正式验证样本'}elseif($c.mode -eq 'learned'){'继续积累此组合的样本'}else{$c.reason}
     $facts=@(
         (Fact 'week' '本周期 token' (Format-Count $g.week_total))
-        (Fact 'estimate' '周配额校准占比' (Format-Estimate $g.quota_estimate $g.week_total))
-        (Fact 'ratestate' '组合校准状态' $rateState)
+        (Fact 'usageshare' '周期用量占比' (Format-Estimate $g.cycle_share.used $g.week_total $g.cycle_share.basis))
+        (Fact 'estimate' '周期总量占比' (Format-Estimate $g.cycle_share.total $g.week_total $g.cycle_share.basis))
+        (Fact 'sharebasis' '占比依据' (Format-EstimateStatus $g.cycle_share.basis))
+        (Fact 'rate' '周配额系数' $rateText)
+        (Fact 'ratekind' '系数依据' $rateKind)
+        (Fact 'creditrate' '计费参考权重' $weightText)
+        (Fact 'weightedshare' '本机加权占比' (Format-Percent $g.local_weighted_share))
+        (Fact 'weightedtokens' '计权 token' ((Format-Count $g.credit_reference_tokens)+' / '+(Format-Count $g.week_total)))
+        (Fact 'ratestate' '组合验证状态' $rateState)
         (Fact 'progress' '当前学习进度' (Format-CalibrationProgress $c))
+        (Fact 'previewblocks' '此组合近 28 天拟合区间' (Format-Count $g.provisional_samples))
+        (Fact 'currentblocks' '此组合本周验证' (([int]$support.current).ToString()+' 区间'))
         (Fact 'samples' '组合有效区间' (Format-Count $g.calibration_samples))
-        (Fact 'currentblocks' '本周校准区间' ('已收集 '+(Format-Count $c.progress.current_cycle_observations)+'；可用于验证 '+(Format-Count $c.current_cycle_holdout)))
         (Fact 'sparse' '少见组合混用' ((Format-Count $c.excluded_sparse)+' 个区间暂不用于拟合'))
-        (Fact 'rate' $(if(-not $g.rate -and $g.historical_rate){'历史系数（参考）'}else{'当前采用系数'}) $rateText)
-        (Fact 'ratekind' '换算口径' $rateKind)
         (Fact 'training' '全局训练 / 验证' ((Format-Count $c.train)+' / '+$c.holdout+' 个区间；近 '+$c.history_days+' 天'))
         (Fact 'error' '本次验证误差' $(if($null -ne $c.mae){'{0:0.00} 个百分点' -f $c.mae}else{'等待本周期验证'}))
         (Fact 'baseline' '统一换算误差' $(if($null -ne $c.baseline_mae){'{0:0.00} 个百分点' -f $c.baseline_mae}else{'等待本周期验证'}))
     )
-    if($c.historical){$facts+=@((Fact 'historyat' '历史验证时间' (Format-Time $c.historical.as_of)),(Fact 'historyerror' '历史验证误差' ((Format-Rate $c.historical.mae)+' 个百分点；仅供参考')))}
+    if($g.historical_rate){
+        $historyText=(@($g.historical_rate.rates|ForEach-Object {'{0:0.####}' -f $_}) -join ' / ')+' 百分点 / 百万 token'
+        $facts+=@((Fact 'historyrate' '历史系数' $historyText),(Fact 'historyat' '历史验证时间' (Format-Time $c.historical.as_of)))
+    }
     $facts+=@(
         (Fact 'filters' '数据过滤记录' (Format-CalibrationFilters $c))
         (Fact 'covered' '已校准 token 覆盖' $(if($c.eligible_tokens){Format-Percent (100*$c.covered_tokens/$c.eligible_tokens)}else{'—'}))
@@ -269,7 +313,7 @@ function Render-Model([string]$id) {
         (Fact 'requests' '周期 / 累计响应' ((Format-Count $g.week_requests)+' / '+(Format-Count $g.requests)))
         (Fact 'unexplained' '账户快照差值' $(if($null -ne $c.unexplained_quota){'{0:0.00} 个百分点' -f $c.unexplained_quota}else{'—'}))
         (Fact 'plan' '套餐上下文' $(if($c.plan_unknown){'日志未记录套餐；变更后需重新验证'}else{'已记录'}))
-        (Fact 'limitations' '估算说明' '每个有效区间至少累计 3 个配额百分点。新周期需 3 个验证区间，并通过误差检查。历史系数保留作参考；新模型独立积累样本。')
+        (Fact 'limitations' '估算说明' '参考权重按官方积分费率和本周期的 token 构成计算。周配额系数由本机区间拟合，≈ 表示暂估。')
     );Sync-StateTable $tables.DetailFacts $facts
 }
 
@@ -298,7 +342,7 @@ function Show-Monitor { $settings.lastView='Main';Save-MonitorSettings;Hide-Mini
 function Export-Usage {
     if(-not $script:snapshot){return};$dialog=New-Object Microsoft.Win32.SaveFileDialog;$dialog.Filter='CSV 文件 (*.csv)|*.csv';$dialog.FileName='Codex用量-'+(Get-Date -Format yyyyMMdd)+'.csv'
     if($dialog.ShowDialog($window)){
-        try{$rows=foreach($s in $snapshot.sessions){[pscustomobject][ordered]@{'会话ID'=$s.id;'标题'=(Protect-Csv $s.title);'类型'=(Get-Kind $s.source);'累计token'=$s.total;'逐条累计token'=$s.recorded;'周期token'=$(if($s.week_known){$s.week_total}else{'未知'});'缓存输入token'=$s.cached;'输出token'=$s.output;'本机周期占比'=$s.local_share;'周配额校准占比'=$s.quota_estimate;'校准状态'=$snapshot.calibration.reason;'token分摊参考'=$s.quota_allocation;'完整性'=(Get-Coverage $s.coverage);'周期开始北京时间'=(Format-Time $snapshot.period.start);'周期结束北京时间'=(Format-Time $snapshot.period.end);'配额快照北京时间'=(Format-Time $snapshot.quota.at_ms)}}
+        try{$rows=foreach($s in $snapshot.sessions){[pscustomobject][ordered]@{'会话ID'=$s.id;'标题'=(Protect-Csv $s.title);'类型'=(Get-Kind $s.source);'累计token'=$s.total;'逐条累计token'=$s.recorded;'周期token'=$(if($s.week_known){$s.week_total}else{'未知'});'缓存输入token'=$s.cached;'输出token'=$s.output;'本机周期占比'=$s.local_share;'周配额估算'=$s.quota_estimate;'估算状态'=(Format-EstimateStatus $s.quota_estimate_status);'本机加权占比'=$s.local_weighted_share;'计权token'=$s.credit_reference_tokens;'完整性'=(Get-Coverage $s.coverage);'周期开始北京时间'=(Format-Time $snapshot.period.start);'周期结束北京时间'=(Format-Time $snapshot.period.end);'配额快照北京时间'=(Format-Time $snapshot.quota.at_ms)}}
             $rows|Export-Csv -LiteralPath $dialog.FileName -NoTypeInformation -Encoding UTF8;$ui.StatusText.Text='已导出 '+$rows.Count+' 个会话：'+$dialog.FileName
         }catch{Write-UiError $_}
     }
@@ -328,9 +372,13 @@ $ui.MethodText.Text=@'
 程序读取 Codex 的本地数据库与会话日志，不修改 Codex 源数据。只显示能够找到的用量；已清理的日志可能只留下累计快照，无法还原周期、模型或速度。
 
 配额与自动学习
-账户周配额来自日志里的账户快照，可能包含其他设备或云端使用。不能直接把 token 等同于订阅配额。本程序自动积累“模型 × 思考深度 × 服务档位”的用量与配额区间，使用时间留出验证比较换算效果，验证通过后才启用该组合的系数。新模型自动分组；样本不足时保持“待校准”。
+账户周配额来自本机日志里的账户快照。会话和模型的配额估算截至快照时间。程序使用近 28 天的有效区间拟合各组合的配额系数。列表用 ≈ 标记暂估，样本不足时等待更多区间。
 
-每个有效区间至少累计 3 个配额百分点。新周期至少需要 3 个验证区间，并通过误差检查。模型页展示累计区间数和等待原因；历史系数保留作参考。拟合落在零边界的组合标记为无法可靠分离，继续积累数据。正常使用即可，不必为了校准额外消耗配额。
+模型表先按本机计费权重给出周期用量占比，读取有效配额快照后可估算周期总量占比。组合积累有效区间后，程序用拟合结果更新估算。详情显示占比依据，≈ 表示暂估。
+
+每个组合通过本周期的独立留出验证后，采用已验证系数。模型详情展示系数依据和验证进度。配额取整、其他设备、云端使用及本机日志缺失都会影响估算。
+
+模型统计和校准使用 Codex 模型目录中的可见模型。未知模型和内部审批用量保留在会话 token 记录中。包含这些用量的区间不参与拟合。
 
 速度的含义
 近 1 分钟 / 5 分钟输出速率是窗口内响应入账的输出 token 除以窗口秒数，包含推理 token。日志通常在响应结束时记账，因此它不是逐 token 生成速度。暂时为 0 不代表模型已停止；缺少日志时显示“未知”。本轮平均值包含工具与等待时间，首响应入账等待也不是首 token 延迟。

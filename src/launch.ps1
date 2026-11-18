@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $launchLock=$null;$readySignal=$null;$acquired=$false
 try {
     if(@($Mini,$Tray,$Main|Where-Object {$_}).Count -gt 1){throw 'Choose one view: -Mini, -Main or -Tray.'}
-    foreach($file in @('version.json','monitor.ps1','mini.ps1','mini-motion.ps1','activity.cjs','questions.cjs','realtime.cjs','runtime-check.cjs','mini.xaml','window.xaml','theme.xaml','ui-state.ps1','collector.cjs','speed.cjs','calibration.cjs','assets\app.ico')){
+    foreach($file in @('version.json','monitor.ps1','mini.ps1','mini-motion.ps1','activity.cjs','questions.cjs','realtime.cjs','runtime-check.cjs','mini.xaml','window.xaml','theme.xaml','ui-state.ps1','storage.ps1','sample-processes.ps1','collector.cjs','speed.cjs','calibration.cjs','assets\app.ico')){
         if(-not [IO.File]::Exists((Join-Path $PSScriptRoot $file))){throw ('Missing package file: '+$file+'. Extract the complete ZIP before starting.')}
     }
     . (Join-Path $PSScriptRoot 'storage.ps1')

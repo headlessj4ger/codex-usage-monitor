@@ -7,7 +7,7 @@ const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 const { createHash } = require('node:crypto');
-const { groupKey, dimensions, calibrationReport, estimateRows } = require('./calibration.cjs');
+const { groupKey, dimensions, features, validUsage, calibrationReport, estimateRows } = require('./calibration.cjs');
 const { buildSpeed } = require('./speed.cjs');
 const { ActivityTracker } = require('./activity.cjs');
 const { answerIds, pendingFromItems } = require('./questions.cjs');
@@ -15,11 +15,84 @@ const { RefreshQueue, LocalChangeFeed } = require('./realtime.cjs');
 const appVersion = require('./version.json').version;
 
 const MINUTE = 60000, WEEK = 10080 * MINUTE;
+// Offline defaults from the Codex model catalog, checked against
+// https://learn.chatgpt.com/docs/models and /docs/pricing on 2026-11-18.
+const OFFICIAL_MODELS = new Set([
+  'gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.1-terra', 'gpt-6.1-sol',
+  'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'
+]);
+// Published Codex credits per million uncached input, cached input and output
+// tokens (2026-11-18). These rates describe reference credits, not weekly quota.
+const CREDIT_RATES = new Map(Object.entries({
+  'gpt-6.2-astra': [200, 10, 1000],
+  'gpt-6.2-sol': [50, 2.5, 250],
+  'gpt-6.1-sol': [50, 2.5, 250],
+  'gpt-6.1-terra': [25, 1.25, 125],
+  'gpt-6-astra': [250, 25, 1250],
+  'gpt-6-sol': [50, 5, 250],
+  'gpt-6-luna': [2.5, .25, 12.5],
+  'gpt-5.6-sol': [100, 10, 500],
+  'gpt-5.6-terra': [50, 5, 300],
+  'gpt-5.6-luna': [5, .5, 30]
+}));
+const FAST_CREDIT_MODELS = new Set([
+  'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'
+]);
+function creditWeight(row) {
+  if (row.kind !== 'response' || row.total <= 0 || !validUsage(row)) return null;
+  const rates = CREDIT_RATES.get(row.model);
+  const multiplier = row.tier === 'default' ? 1 : row.tier === 'priority' && FAST_CREDIT_MODELS.has(row.model) ? 2 : null;
+  if (!rates || multiplier === null) return null;
+  return multiplier * features(row).reduce((credits, tokens, i) => credits + tokens * rates[i], 0);
+}
+
+function applyModelCycleShares(groups, quota, weights) {
+  if (!quota) {
+    for (const group of groups) {
+      if (group.local_weighted_share !== null) {
+        group.cycle_share = { used: group.local_weighted_share, total: null, basis: 'weighted' };
+      }
+    }
+    return;
+  }
+  const used = quota.used_percent;
+  const fittedTotal = groups.reduce((total, group) => total + (group.quota_estimate ?? 0), 0);
+  const hasUnfittedWeights = groups.some(group => group.quota_estimate === null && weights.has(group.key));
+  // Display a coherent allocation even if rounding or a poor fit consumes
+  // the entire snapshot while there is still uncalibrated weighted usage.
+  const useFit = fittedTotal < used || !hasUnfittedWeights;
+  const unfitted = group => !useFit || group.quota_estimate === null;
+  const remaining = useFit ? used - fittedTotal : used;
+  const remainingWeight = groups.filter(unfitted).reduce((total, group) => total + (weights.get(group.key) || 0), 0);
+  for (const group of groups) {
+    if (!unfitted(group)) {
+      const total = group.quota_estimate;
+      group.cycle_share = { used: used > 0 && total <= used ? 100 * (total / used) : null,
+        total, basis: group.quota_estimate_status };
+    } else if (weights.has(group.key)) {
+      const fraction = weights.get(group.key) / remainingWeight;
+      const total = remaining * fraction;
+      group.cycle_share = { used: used > 0 ? 100 * (total / used) : 100 * fraction, total, basis: 'weighted' };
+    }
+  }
+}
+
 const number = v => Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0;
 function usage(u = {}) {
   const input = number(u.input_tokens), output = number(u.output_tokens);
   return { input, cached: Math.min(input, number(u.cached_input_tokens)), output,
     reasoning: Math.min(output, number(u.reasoning_output_tokens)), total: u.total_tokens == null ? input + output : number(u.total_tokens) };
+}
+function differenceUsage(a, b) {
+  return Object.fromEntries(Object.keys(a).map(key => [key, Math.max(0, a[key] - (b?.[key] || 0))]));
+}
+function counterUsage(raw) {
+  if (!Number.isSafeInteger(raw?.total_tokens) || raw.total_tokens < 0) return null;
+  const count = usage(raw);
+  return count.input + count.output === count.total ? count : null;
+}
+function sameUsage(a, b) {
+  return !!a && !!b && Object.keys(a).every(key => a[key] === b[key]);
 }
 function hash(s) { return createHash('sha256').update(s).digest('hex'); }
 function localPath(s) { return typeof s === 'string' ? s.replace(/^\\\\\?\\/, '') : s; }
@@ -34,7 +107,7 @@ function weekdayStart(now) {
   return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate() - day) - 8 * 3600000;
 }
 function periodFromQuota(quota, now = Date.now()) {
-  if (quota && quota.reset_at * 1000 > now && quota.reset_at * 1000 - WEEK <= now)
+  if (quota && !quota.conflict && quota.reset_at * 1000 > now && quota.reset_at * 1000 - WEEK <= now)
     return { start: quota.reset_at * 1000 - WEEK, end: quota.reset_at * 1000, kind: 'quota', expired: false };
   const start = weekdayStart(now);
   return { start, end: start + WEEK, kind: 'calendar', expired: !!quota };
@@ -45,8 +118,11 @@ function normalizedWindows(raw) {
   return ['primary', 'secondary'].flatMap(key => {
     const w = raw[key];
     if (!w || w.used_percent == null && w.usedPercent == null) return [];
-    return [{ limit_id: id, window_minutes: number(w.window_minutes ?? w.windowDurationMins),
-      reset_at: number(w.resets_at ?? w.resetsAt), used_percent: number(w.used_percent ?? w.usedPercent) }];
+    const window_minutes = w.window_minutes ?? w.windowDurationMins, reset_at = w.resets_at ?? w.resetsAt;
+    const used_percent = w.used_percent ?? w.usedPercent;
+    if (!Number.isSafeInteger(window_minutes) || window_minutes <= 0 || !Number.isSafeInteger(reset_at)
+      || reset_at <= 0 || !Number.isFinite(used_percent) || used_percent < 0 || used_percent > 100) return [];
+    return [{ limit_id: id, window_minutes, reset_at, used_percent }];
   });
 }
 function summarizeCommand(command) {
@@ -87,6 +163,7 @@ function flattenProcesses(rows, knownIds, monitorPid) {
 
 class Collector {
   constructor(options = {}) {
+    this.processSampler = options.processSampler;
     this.home = options.home || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
     this.dataDir = options.dataDir || path.join(__dirname, 'data');
     fs.mkdirSync(this.dataDir, { recursive: true });
@@ -107,12 +184,12 @@ class Collector {
     // Non-destructive migration: replay available logs to backfill dimensions, retaining pruned history.
     const usageFields=new Set(this.db.prepare('PRAGMA table_info(usage)').all().map(r=>r.name));
     const quotaFields=new Set(this.db.prepare('PRAGMA table_info(quotas)').all().map(r=>r.name));
-    let backfill=this.db.prepare('PRAGMA user_version').get().user_version<5;
+    let backfill=this.db.prepare('PRAGMA user_version').get().user_version<6;
     this.db.exec('BEGIN');
     for(const field of ['effort','tier','scope','turn_id'])if(!usageFields.has(field)){this.db.exec(`ALTER TABLE usage ADD COLUMN ${field} TEXT NOT NULL DEFAULT 'unknown'`);backfill=true;}
     for(const field of ['scope','plan'])if(!quotaFields.has(field)){this.db.exec(`ALTER TABLE quotas ADD COLUMN ${field} TEXT NOT NULL DEFAULT 'unknown'`);backfill=true;}
     if(backfill)this.db.exec('DELETE FROM cursors');
-    this.db.exec('PRAGMA user_version=5; COMMIT');
+    this.db.exec('PRAGMA user_version=6; COMMIT');
     this.sessions = new Map(this.db.prepare('SELECT * FROM sessions').all().map(r => [r.id, parse(r.json, {})]));
     this.cursors = new Map(this.db.prepare('SELECT * FROM cursors').all().map(r => [r.path, parse(r.json, {})]));
     this.insertUsage = this.db.prepare(`INSERT INTO usage(event_key,thread_id,at_ms,model,input,cached,output,reasoning,total,kind,effort,tier,scope,turn_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -120,7 +197,11 @@ class Collector {
       effort=CASE WHEN excluded.model!='unknown' AND excluded.turn_id!='unknown' THEN excluded.effort ELSE usage.effort END,
       tier=CASE WHEN excluded.model!='unknown' AND excluded.turn_id!='unknown' THEN excluded.tier ELSE usage.tier END,
       scope=CASE WHEN excluded.scope!='unknown' THEN excluded.scope ELSE usage.scope END,
-      turn_id=CASE WHEN excluded.turn_id!='unknown' THEN excluded.turn_id ELSE usage.turn_id END`);
+      turn_id=CASE WHEN excluded.turn_id!='unknown' THEN excluded.turn_id ELSE usage.turn_id END
+      WHERE usage.thread_id=excluded.thread_id`);
+    this.deleteLegacy = this.db.prepare("DELETE FROM usage WHERE event_key=? AND thread_id=? AND kind='cumulative_delta'");
+    this.correctLegacy = this.db.prepare("UPDATE usage SET input=?,cached=?,output=?,reasoning=?,total=? WHERE event_key=? AND thread_id=? AND kind='cumulative_delta'");
+    this.findQuota = this.db.prepare('SELECT scope,plan FROM quotas WHERE event_key=?');
     this.insertQuota = this.db.prepare(`INSERT INTO quotas(event_key,limit_id,window_minutes,reset_at,at_ms,used_percent,scope,plan) VALUES(?,?,?,?,?,?,?,?)
       ON CONFLICT(event_key) DO UPDATE SET scope=CASE WHEN excluded.scope!='unknown' THEN excluded.scope ELSE quotas.scope END,
       plan=CASE WHEN excluded.plan!='unknown' THEN excluded.plan ELSE quotas.plan END`);
@@ -196,6 +277,82 @@ class Collector {
     this.insertUsage.run(key, thread, at, model || 'unknown', u.input, u.cached, u.output, u.reasoning, u.total, kind,context.effort||'unknown',context.tier||'unknown',context.scope||'unknown',context.turn||'unknown');
     this.calibrationCache=null;
   }
+  addQuota(q, at, scope, plan) {
+    const key = hash([q.limit_id, q.window_minutes, q.reset_at, at, q.used_percent].join(':'));
+    const existing = this.findQuota.get(key);
+    const other = (a, b) => a !== 'unknown' && b !== 'unknown' && a !== b;
+    const eventKey = existing && (other(existing.scope, scope) || other(existing.plan, plan))
+      ? hash([key, scope, plan].join(':')) : key;
+    this.insertQuota.run(eventKey, q.limit_id, q.window_minutes, q.reset_at, at, q.used_percent, scope, plan);
+    this.calibrationCache = null;
+  }
+  legacyDelta(cursor, at, current, delta) {
+    const key = 'legacy:' + cursor.id + ':' + hash([at, JSON.stringify(current)].join(':'));
+    if (delta?.total > 0) {
+      this.addUsage(key, cursor.id, at, cursor.model, delta, 'cumulative_delta', cursor);
+      this.correctLegacy.run(delta.input, delta.cached, delta.output, delta.reasoning, delta.total, key, cursor.id);
+      cursor.lastLegacy = { key, at, current, delta };
+    } else if (this.deleteLegacy.run(key, cursor.id).changes) {
+      this.calibrationCache = null;
+    }
+  }
+  applyResponseCounter(cursor, session, responseKey, response, raw, at) {
+    // A replay still has to advance its cursor. Repeated response IDs within
+    // that replay must not advance a second time.
+    cursor.responseKeys ||= [];
+    if (cursor.responseKeys.includes(responseKey)) return;
+    cursor.responseKeys.push(responseKey);
+    if (cursor.responseKeys.length > 64) cursor.responseKeys.shift();
+    const current = counterUsage(raw);
+    if (!current || current.total < response.total) {
+      const pending = cursor.pendingUsage || {};
+      cursor.pendingUsage = Object.fromEntries(Object.keys(response).map(key => [key, (pending[key] || 0) + response[key]]));
+      return;
+    }
+    if (!cursor.responseCounter && cursor.inheritsHistory) {
+      const carry = current.total - response.total;
+      if ((!cursor.baseline && cursor.initialInheritedCount == null) || cursor.initialInheritedCount === carry) session.inherited_usage = carry;
+    }
+    const fallback = cursor.lastLegacy;
+    if (fallback && Math.abs(at - fallback.at) <= 120000 && sameUsage(fallback.current, current)
+      && Object.keys(response).every(key => response[key] <= fallback.delta[key])) {
+      // A cumulative event may arrive first. Replace just the overlap proved
+      // by the matching full counter, preserving any unmatched legacy tokens.
+      const remaining = differenceUsage(fallback.delta, response);
+      if (remaining.total) this.correctLegacy.run(remaining.input, remaining.cached, remaining.output, remaining.reasoning, remaining.total, fallback.key, cursor.id);
+      else this.deleteLegacy.run(fallback.key, cursor.id);
+      cursor.lastLegacy = null;
+    }
+    cursor.responseCounter = true;
+    if (!cursor.baseline || current.total >= cursor.baseline.total) cursor.baseline = current;
+    cursor.pendingUsage = null;
+  }
+  applyLegacyCounter(cursor, session, info, current, at) {
+    const previous = cursor.baseline, pending = cursor.pendingUsage;
+    if (!previous && cursor.inheritsHistory && !pending) {
+      cursor.initialInheritedCount = current.total;
+      this.legacyDelta(cursor, at, current, null);
+    } else if (!previous && !cursor.sawOwnMeta && !pending) {
+      // The beginning of this log is missing. Remember its first counter as a baseline.
+    } else if (previous && current.total < previous.total) {
+      if (cursor.responseCounter || pending) {
+        this.legacyDelta(cursor, at, current, null);
+        return; // An authoritative response counter can be ahead of the notification.
+      }
+      cursor.lastLegacy = null;
+      this.legacyDelta(cursor, at, current, info.last_token_usage ? usage(info.last_token_usage) : null);
+    } else {
+      const delta = differenceUsage(current, previous);
+      if (pending && delta.total < pending.total) {
+        this.legacyDelta(cursor, at, current, null);
+        return; // Keep unmatched direct responses until the counter catches up.
+      }
+      this.legacyDelta(cursor, at, current, differenceUsage(delta, pending));
+    }
+    cursor.baseline = current;
+    cursor.pendingUsage = null;
+    session.last_counter = current.total;
+  }
   context(cursor, settings, turn, reset = false, remember = true) {
     const collaboration=settings.collaboration_mode?.settings||{};
     cursor.model=settings.model||collaboration.model||(reset?'unknown':cursor.model)||'unknown';
@@ -217,9 +374,10 @@ class Collector {
         // Full-history forks can retain the parent's session_meta at byte 0.
         // The state database / rollout filename identifies the actual owner.
         const child = this.sessions.get(id);
+        cursor.inheritsHistory = true;
         cursor.created = child?.created || cursor.created || 0;
         this.edge(p.id,id,child?.thread_source==='subagent'?'subagent':child?.thread_source==='guardian_review'?'guardian':'fork','rollout.inherited_session_meta');
-        if(child){child.rollout_path=file;child.log_available=true;}
+        if(child){child.rollout_path=file;child.log_available=true;child.inherited_history=true;}
         return;
       }
       cursor.created = Date.parse(p.timestamp || obj.timestamp) || cursor.created || 0;
@@ -227,6 +385,10 @@ class Collector {
       Object.assign(s, { rollout_path: file, log_available:true, created: s.created || cursor.created, source: p.source,
         cwd: localPath(p.cwd) || s.cwd, thread_source: p.thread_source || s.thread_source || 'user',
         agent_path: p.agent_path || s.agent_path, model_provider: p.model_provider || s.model_provider });
+      cursor.sawOwnMeta = true;
+      cursor.inheritsHistory ||= !!(p.history_base || p.forked_from_id || p.forked_from_thread_id
+        || s.thread_source === 'guardian_review' || s.thread_source === 'agent_forked_thread');
+      if (cursor.inheritsHistory) s.inherited_history = true;
       this.sessions.set(id, s);
       const fork = p.forked_from_id || p.forked_from_thread_id;
       if (fork) this.edge(fork, id, 'fork', 'rollout.session_meta');
@@ -284,34 +446,27 @@ class Collector {
     if (obj.type === 'token_usage_record') {
       // A fork may contain copied parent records. Record ownership is authoritative.
       if (p.thread_id && p.thread_id !== cursor.id) return;
-      if (at < cursor.created) return;
+      if (!at || at < cursor.created || !p.usage) return;
       const u = usage(p.usage);
       const key = p.response_id ? 'response:' + p.response_id : 'record:' + cursor.id + ':' + (obj.ordinal ?? byteOffset);
-      const context=p.turn_id ? cursor.contexts?.[p.turn_id]||{model:'unknown'} : cursor;
+      const context = cursor.contexts?.[p.turn_id] || { model: 'unknown' };
       this.addUsage(key, cursor.id, at, context.model, u, 'response',{...context,scope:cursor.scope});
-      cursor.recordSinceCount = true;
+      this.applyResponseCounter(cursor, s, key, u, p.thread_token_usage, at);
       s.record_count = (s.record_count || 0) + 1;
       return;
     }
     if (p.type === 'token_count') {
-      for (const q of normalizedWindows(p.rate_limits)) {
-        const key = hash([q.limit_id,q.window_minutes,q.reset_at,at,q.used_percent].join(':'));
-        this.insertQuota.run(key,q.limit_id,q.window_minutes,q.reset_at,at,q.used_percent,cursor.scope||'unknown',p.rate_limits?.plan_type||'unknown');
-        this.calibrationCache=null;
-      }
+      if (!at || p.thread_id && p.thread_id !== cursor.id) return;
+      const plan = p.rate_limits?.plan_type || p.rate_limits?.planType || 'unknown';
+      if (at >= cursor.created) for (const q of normalizedWindows(p.rate_limits)) this.addQuota(q, at, cursor.scope || 'unknown', plan);
       const raw = p.info?.total_token_usage;
       if (!raw) return;
-      const current = usage(raw), previous = cursor.baseline;
-      if (!cursor.recordSinceCount && at >= cursor.created) {
-        let delta;
-        if (previous && current.total < previous.total) {
-          // A counter reset is not negative spend. Use only the explicitly reported last request.
-          delta = p.info.last_token_usage ? usage(p.info.last_token_usage) : null;
-        } else delta = Object.fromEntries(Object.keys(current).map(k => [k, Math.max(0,current[k] - (previous?.[k] || 0))]));
-        if (delta && delta.total > 0) this.addUsage('legacy:' + cursor.id + ':' + hash([at,JSON.stringify(current)].join(':')),cursor.id,at,cursor.model,delta,'cumulative_delta',cursor);
+      const current = usage(raw);
+      if (at < cursor.created) {
+        if (!cursor.responseCounter && !cursor.pendingUsage) cursor.baseline = current;
+        return;
       }
-      cursor.baseline = current; cursor.recordSinceCount = false;
-      s.last_counter = current.total;
+      this.applyLegacyCounter(cursor, s, p.info, current, at);
       return;
     }
     if (p.type === 'item_completed') {
@@ -386,8 +541,13 @@ class Collector {
     }
     if (stat.size === cursor.offset && cursor.mtime === stat.mtimeMs) return;
     const suffix = path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1];
-    const owner = suffix && this.sessions.has(suffix) ? suffix : [...this.sessions.values()].find(s=>s.rollout_path===file)?.id;
-    if(owner){cursor.owner=owner;cursor.id=owner;cursor.created=this.sessions.get(owner).created||cursor.created||0;this.sessions.get(owner).log_available=true;}
+    const owner = suffix || [...this.sessions.values()].find(s => s.rollout_path === file)?.id;
+    if (owner) {
+      const session = this.sessions.get(owner);
+      cursor.owner = cursor.id = owner;
+      cursor.created = session?.created || cursor.created || 0;
+      if (session) session.log_available = true;
+    }
     const stream = fs.createReadStream(file,{ start: cursor.offset, end: Math.max(cursor.offset,stat.size - 1), highWaterMark: 256 * 1024 });
     let pending = Buffer.alloc(0), committed = cursor.offset;
     this.db.exec('BEGIN');
@@ -398,7 +558,10 @@ class Collector {
           const text = pending.subarray(from,end).toString('utf8').replace(/^\uFEFF/, '').replace(/\r$/, '');
           const obj = parse(text);
           if (obj) this.ingestObject(obj,cursor,file,committed);
-          else if (text.trim()) this.warn('有损坏的日志行已跳过：' + path.basename(file));
+          else if (text.trim()) {
+            cursor.damaged = true;
+            this.warn('有损坏的日志行已跳过：' + path.basename(file));
+          }
           const length = end - from + 1; committed += length; from = end + 1;
         }
         pending = pending.subarray(from);
@@ -408,7 +571,11 @@ class Collector {
       cursor.offset = committed; cursor.mtime = stat.mtimeMs; cursor.size = stat.size; cursor.fileId = String(stat.ino);
       this.cursors.set(file,cursor);
       this.db.prepare('INSERT OR REPLACE INTO cursors VALUES(?,?)').run(file,JSON.stringify(cursor));
-      if (cursor.id && this.sessions.has(cursor.id)) this.saveSession(this.sessions.get(cursor.id));
+      if (cursor.id && this.sessions.has(cursor.id)) {
+        const session = this.sessions.get(cursor.id);
+        session.damaged_log = !!cursor.damaged;
+        this.saveSession(session);
+      }
       this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); this.cursors.delete(file); throw e; }
   }
@@ -462,18 +629,62 @@ class Collector {
   activitySnapshot(now=Date.now()){
     return {type:'activity',at:now,last_activity_scan:this.lastActivityScan||0,speed:this.speedSnapshot(now)};
   }
-  snapshot(now = Date.now()) {
-    const quota = this.db.prepare("SELECT * FROM quotas WHERE window_minutes=10080 AND limit_id='codex' AND at_ms<=? ORDER BY at_ms DESC LIMIT 1").get(now) || null;
+  latestQuota(now) {
+    const matches = this.db.prepare(`SELECT * FROM quotas WHERE window_minutes=10080 AND limit_id='codex' AND at_ms=(
+      SELECT MAX(at_ms) FROM quotas WHERE window_minutes=10080 AND limit_id='codex' AND at_ms>0 AND at_ms<=?
+      AND used_percent BETWEEN 0 AND 100 AND reset_at>0) AND used_percent BETWEEN 0 AND 100 AND reset_at>0
+      ORDER BY scope='unknown', reset_at DESC, used_percent DESC, event_key`).all(now);
+    if (!matches.length) return null;
+    const first = matches[0];
+    const knownScopes = new Set(matches.filter(q => q.scope !== 'unknown').map(q => q.scope));
+    if (knownScopes.size > 1) return { ...first, conflict: true, conflict_reason: '同一时刻出现多个账户的配额快照' };
+    if (matches.some(q => q.scope === first.scope
+      && (q.plan !== first.plan || q.used_percent !== first.used_percent || Math.abs(q.reset_at - first.reset_at) > 120))) {
+      return { ...first, conflict: true, conflict_reason: '同一时刻的配额快照互相冲突' };
+    }
+    return first;
+  }
+  modelCatalog() {
+    const file = path.join(this.home, 'models_cache.json');
+    try {
+      const stat = fs.statSync(file);
+      const signature = [stat.ino, stat.mtimeMs, stat.size].join(':');
+      if (this.catalogCache?.signature === signature) return this.catalogCache;
+      const cache = parse(fs.readFileSync(file, 'utf8'));
+      if (Array.isArray(cache?.models) && Number.isFinite(Date.parse(cache.fetched_at))) {
+        const models = new Set(cache.models.filter(model => model?.visibility === 'list'
+          && typeof model.slug === 'string' && /^[a-z0-9][a-z0-9._-]{0,95}$/.test(model.slug)
+          && model.slug !== 'unknown').map(model => model.slug));
+        if (models.size) return this.catalogCache = { signature, models, source: 'codex' };
+      }
+      // Keep the previous catalog if the current write is incomplete.
+      if (this.catalogCache?.source === 'codex') return this.catalogCache;
+    } catch (error) {
+      if (error.code !== 'ENOENT' && this.catalogCache?.source === 'codex') return this.catalogCache;
+    }
+    return this.catalogCache = { signature: 'bundled', models: OFFICIAL_MODELS, source: 'bundled' };
+  }
+  snapshot(now = Date.now(), recentSpeed = null) {
+    const quota = this.latestQuota(now);
     const period = periodFromQuota(quota,now);
-    const all = new Map(this.db.prepare('SELECT thread_id,SUM(total) total,SUM(input) input,SUM(cached) cached,SUM(output) output,SUM(reasoning) reasoning,COUNT(*) requests FROM usage GROUP BY thread_id').all().map(r => [r.thread_id,r]));
-    const weekly = new Map(this.db.prepare('SELECT thread_id,SUM(total) total,SUM(input) input,SUM(cached) cached,SUM(output) output,SUM(reasoning) reasoning,COUNT(*) requests FROM usage WHERE at_ms>=? AND at_ms<? GROUP BY thread_id').all(period.start,Math.min(now + 1,period.end)).map(r => [r.thread_id,r]));
+    const all = new Map(this.db.prepare("SELECT thread_id,SUM(total) total,SUM(input) input,SUM(cached) cached,SUM(output) output,SUM(reasoning) reasoning,SUM(kind='response') requests FROM usage GROUP BY thread_id").all().map(r => [r.thread_id,r]));
+    const weekly = new Map(this.db.prepare("SELECT thread_id,SUM(total) total,SUM(input) input,SUM(cached) cached,SUM(output) output,SUM(reasoning) reasoning FROM usage WHERE at_ms>=? AND at_ms<? GROUP BY thread_id").all(period.start,Math.min(now + 1,period.end)).map(r => [r.thread_id,r]));
     const commandCounts = new Map(this.db.prepare('SELECT thread_id,COUNT(*) n FROM commands GROUP BY thread_id').all().map(r => [r.thread_id,r.n]));
     const edges = this.db.prepare('SELECT * FROM edges').all();
+    const inheritedChildren = new Set(edges.filter(edge => ['fork', 'guardian'].includes(edge.kind)
+      || edge.evidence === 'rollout.inherited_session_meta').map(edge => edge.child_id));
     const items = [...this.sessions.values()].map(s => {
       const totals = all.get(s.id), week = weekly.get(s.id);
       const recorded = totals?.total || 0;
-      const total = Math.max(recorded,s.metadata_tokens || 0);
-      const coverage = !s.log_available && !recorded ? 'metadata' : total > recorded ? 'partial' : 'records';
+      const inherited = s.inherited_history || inheritedChildren.has(s.id)
+        || ['guardian_review', 'agent_forked_thread'].includes(s.thread_source);
+      const ownCounter = inherited
+        ? s.inherited_usage == null ? null : Math.max(0, (s.metadata_tokens || 0) - s.inherited_usage)
+        : s.metadata_tokens || 0;
+      const inheritedOnly = inherited && ownCounter === null && !s.log_available && !recorded;
+      const total = inheritedOnly ? null : Math.max(recorded, ownCounter || 0);
+      const coverage = inheritedOnly ? 'inherited' : !s.log_available && !recorded ? 'metadata'
+        : total > recorded || s.damaged_log ? 'partial' : 'records';
       return { id:s.id, title:s.title || s.agent_path || s.id, source:s.thread_source || 'user', model:s.model || 'unknown',
         agent_path:s.agent_path || '', cwd:s.cwd || '', archived:!!s.archived,
         created:s.created || 0, updated:Math.max(s.updated || 0,s.last_event || 0), total, recorded,
@@ -484,64 +695,119 @@ class Collector {
         active:!!s.last_task_start && s.last_task_start > (s.last_task_end || 0) && now - (s.last_event || 0) < 180000 };
     });
     const weekTotal = items.reduce((sum,s) => sum + s.week_total,0);
+    const learned = this.calibrationSnapshot(quota, period, now, items);
     for (const item of items) {
       item.local_share = weekTotal ? item.week_total / weekTotal * 100 : null;
-      // This is deliberately a transparent allocation scenario, not a billed per-thread quota.
-      item.quota_allocation = quota && period.kind === 'quota' && weekTotal && item.week_known ? quota.used_percent * item.week_total / weekTotal : null;
+      const weighted = learned.creditByThread.get(item.id);
+      item.local_weighted_share = weighted && learned.report.credit_reference.credits > 0
+        ? 100 * weighted.credits / learned.report.credit_reference.credits : null;
+      item.credit_reference_tokens = weighted?.tokens || 0;
     }
-    const learned=this.calibrationSnapshot(quota,period,now,items);
-    const speed=this.speedSnapshot(now,edges);
+    const speed=recentSpeed || this.speedSnapshot(now,edges);
     const speedById=new Map(speed.rows.map(r=>[r.id,r]));
     for(const item of items){
       const estimate=learned.byThread.get(item.id);
       item.quota_estimate=estimate?.value??null;
-      item.quota_estimated_tokens=estimate?.covered_tokens||0;
+      item.quota_estimate_status=estimate?.status??null;
+      item.quota_estimated_tokens=estimate?.estimated_tokens||0;
+      item.quota_validated_tokens=estimate?.covered_tokens||0;
       item.quota_eligible_tokens=estimate?.total_tokens||0;
+      item.quota_unlisted_model_tokens=learned.unlistedByThread.get(item.id)||0;
       const live=speedById.get(item.id);item.active=!!live?.is_open&&!live.long_stale;item.speed=live||null;
     }
     items.sort((a,b) => b.updated-a.updated);
     return { type:'snapshot',version:1,app_version:appVersion,at:now,last_scan:this.lastScan,home:this.home,quota:quota ? {...quota,age_ms:now-quota.at_ms,expired:period.expired} : null,
-      period,week_total:weekTotal,lifetime_total:items.reduce((sum,s) => sum+s.total,0),sessions:items,edges,calibration:learned.report,combinations:learned.combinations,speed,
-      coverage:{ sessions:items.length,with_logs:items.filter(s => s.log_available).length,metadata_only:items.filter(s => s.coverage==='metadata').length,
+      period,week_total:weekTotal,lifetime_total:items.reduce((sum,s) => sum+(s.total || 0),0),sessions:items,edges,calibration:learned.report,combinations:learned.combinations,speed,
+      coverage:{ sessions:items.length,with_logs:items.filter(s => s.log_available).length,metadata_only:items.filter(s => ['metadata','inherited'].includes(s.coverage)).length,
         recent_missing:items.filter(s => !s.log_available && s.updated>=period.start).length },
       processes:this.processes,process_at:this.processAt,process_error:this.processError,warnings:this.warnings,state_available:this.stateAvailable };
   }
   calibrationSnapshot(quota,period,now,sessions) {
-    const cacheKey=[this.lastScan,quota?.event_key,period.start,period.kind].join('|');
+    const catalog = this.modelCatalog();
+    const cacheKey=[this.lastScan,quota?.event_key,period.start,period.kind,catalog.signature].join('|');
     if(this.calibrationCache?.key===cacheKey)return this.calibrationCache;
     const rows=this.db.prepare('SELECT thread_id,at_ms,model,effort,tier,scope,input,cached,output,reasoning,total,kind FROM usage WHERE at_ms<=? ORDER BY at_ms').all(now);
     const q=quota||{at_ms:now,scope:'unknown',plan:'unknown'};
-    const missingAt=sessions.filter(s=>s.coverage==='metadata').map(s=>s.updated);
+    const missingRanges = sessions.flatMap(item => {
+      const source = this.sessions.get(item.id);
+      const hasMetadataGap = item.total > item.recorded
+        || item.coverage === 'inherited' && source?.metadata_tokens > 0;
+      if (!hasMetadataGap && !source?.damaged_log) return [];
+      const start = item.created || q.at_ms - 28 * 86400000;
+      return [{ start, end: Math.max(start, source?.updated || item.updated) }];
+    });
     const quotas=this.db.prepare("SELECT * FROM quotas WHERE window_minutes=10080 AND limit_id='codex' AND at_ms>=? AND at_ms<=? ORDER BY at_ms").all(q.at_ms-28*86400000,q.at_ms);
-    let report={...calibrationReport(rows,quotas,q,{missingAt}),history_days:28,source:'本机日志',plan_unknown:q.plan==='unknown'};
-    if(period.kind!=='quota')report={...report,mode:'pending',reason:'配额快照缺失或已过期',groups:[]};
-    const week=rows.filter(r=>r.at_ms>=period.start&&r.at_ms<period.end),eligible=week.filter(r=>r.at_ms<=q.at_ms);
+    let report={...calibrationReport(rows,quotas,q,{missingRanges,allowedModels:catalog.models}),history_days:28,source:'本机日志',
+      plan_unknown:q.plan==='unknown',model_catalog:catalog.source};
+    if(period.kind!=='quota' || q.conflict)report={...report,mode:'pending',
+      reason:q.conflict?q.conflict_reason:'配额快照缺失或已过期',groups:[],provisional:null};
+    const week=rows.filter(r=>r.at_ms>=period.start&&r.at_ms<period.end),throughSnapshot=week.filter(r=>r.at_ms<=q.at_ms);
+    const eligible = [], unlistedByThread = new Map();
     const byThread=new Map(),threadRows=new Map(),comboRows=new Map(),combinations=new Map();
-    for(const r of eligible){
+    for (const r of throughSnapshot) {
+      const listed = catalog.models.has(r.model);
+      if (!listed) {
+        unlistedByThread.set(r.thread_id, (unlistedByThread.get(r.thread_id) || 0) + r.total);
+        continue;
+      }
+      eligible.push(r);
       if(!threadRows.has(r.thread_id))threadRows.set(r.thread_id,[]);threadRows.get(r.thread_id).push(r);
       const key=groupKey(r);if(!comboRows.has(key))comboRows.set(key,[]);comboRows.get(key).push(r);
     }
     for(const [id,records] of threadRows)byThread.set(id,estimateRows(records,report));
+    const creditByThread = new Map();
+    const creditReference = { credits: 0, tokens: 0 };
+    const quotaForShares = period.kind === 'quota' && !q.conflict && report.usage_window ? q : null;
+    const quotaWeights = new Map();
     for(const r of rows){
+      if (!catalog.models.has(r.model)) continue;
       const key=groupKey(r);
-      if(!combinations.has(key))combinations.set(key,{...dimensions(key),total:0,requests:0,week_total:0,week_uncached:0,week_cached:0,week_output:0,week_reasoning:0,week_requests:0});
-      const g=combinations.get(key);g.total+=r.total;g.requests++;
-      if(r.at_ms>=period.start&&r.at_ms<period.end){g.week_total+=r.total;g.week_uncached+=r.input-r.cached;g.week_cached+=r.cached;g.week_output+=r.output;g.week_reasoning+=r.reasoning;g.week_requests++;}
+      if(!combinations.has(key))combinations.set(key,{...dimensions(key),total:0,requests:0,week_total:0,week_uncached:0,week_cached:0,week_output:0,week_reasoning:0,week_requests:0,
+        credit_reference:0,credit_reference_tokens:0});
+      const g=combinations.get(key), response=r.kind==='response' ? 1 : 0;g.total+=r.total;g.requests+=response;
+      if(r.at_ms>=period.start&&r.at_ms<period.end){
+        g.week_total+=r.total;g.week_uncached+=r.input-r.cached;g.week_cached+=r.cached;g.week_output+=r.output;g.week_reasoning+=r.reasoning;g.week_requests+=response;
+        const credits = creditWeight(r);
+        if (credits !== null) {
+          let entry = creditByThread.get(r.thread_id);
+          if (!entry) creditByThread.set(r.thread_id, entry = { credits: 0, tokens: 0 });
+          entry.credits += credits;
+          entry.tokens += r.total;
+          g.credit_reference += credits;
+          g.credit_reference_tokens += r.total;
+          creditReference.credits += credits;
+          creditReference.tokens += r.total;
+          if (quotaForShares && r.scope === q.scope && r.at_ms <= q.at_ms && r.at_ms > report.plan_cutoff) {
+            quotaWeights.set(key, (quotaWeights.get(key) || 0) + credits);
+          }
+        }
+      }
     }
-    for(const g of combinations.values()){
+    const groups = [...combinations.values()];
+    for(const g of groups){
       const estimated=estimateRows(comboRows.get(g.key)||[],report);
-      g.quota_estimate=estimated.value;g.calibration_samples=report.support[g.key]||0;
+      g.quota_estimate=estimated.value;g.quota_estimate_status=estimated.status;g.calibration_samples=report.support[g.key]||0;
       g.rate=report.groups.find(m=>m.key===g.key)||null;
       g.historical_rate=report.historical?.groups.find(m=>m.key===g.key)||null;
+      g.provisional_rate = report.provisional?.group_rates[g.key] ?? null;
+      g.provisional_samples = report.fit_progress.support[g.key] || 0;
+      g.credit_reference_rate = g.credit_reference_tokens ? 1e6 * g.credit_reference / g.credit_reference_tokens : null;
+      g.local_weighted_share = g.credit_reference_tokens && creditReference.credits > 0
+        ? 100 * g.credit_reference / creditReference.credits : null;
       g.calibration_warning=(report.unresolved_groups.find(m=>m.key===g.key)||report.historical?.unresolved_groups.find(m=>m.key===g.key))?.reason||null;
     }
+    applyModelCycleShares(groups, quotaForShares, quotaWeights);
     const total=estimateRows(eligible,report);
-    Object.assign(report,{estimated_quota:total.value,estimated_known_quota:total.known_value,covered_tokens:total.covered_tokens,eligible_tokens:total.total_tokens,
-      unexplained_quota:total.value===null?null:q.used_percent-total.value,
-      dimension_unknown_tokens:rows.filter(r=>r.model==='unknown'||r.effort==='unknown').reduce((a,r)=>a+r.total,0),
-      missing_recent_sessions:missingAt.filter(at=>at>=q.at_ms-28*86400000).length,
+    const unlistedTokens = [...unlistedByThread.values()].reduce((n, tokens) => n + tokens, 0);
+    Object.assign(report,{estimated_quota:total.value,estimated_quota_status:total.status,
+      estimated_known_quota:total.known_value,estimated_tokens:total.estimated_tokens,covered_tokens:total.covered_tokens,eligible_tokens:total.total_tokens,
+      credit_reference:creditReference,
+      unlisted_model_tokens:unlistedTokens,
+      unexplained_quota:total.status==='validated'&&!unlistedTokens?q.used_percent-total.value:null,
+      dimension_unknown_tokens:rows.filter(r=>r.model==='unknown'||r.effort==='unknown'||r.tier==='unknown').reduce((a,r)=>a+r.total,0),
+      missing_recent_sessions:missingRanges.filter(r=>r.end>=q.at_ms-28*86400000&&r.start<=q.at_ms).length,
       limitations:'配额以整数百分比记录；套餐信息未必提供。其他设备、云端消耗、缺失日志和计费变化仍可能影响估算。'});
-    this.calibrationCache={key:cacheKey,report,byThread,combinations:[...combinations.values()].sort((a,b)=>b.week_total-a.week_total||a.key.localeCompare(b.key))};
+    this.calibrationCache={key:cacheKey,report,byThread,unlistedByThread,creditByThread,combinations:groups.sort((a,b)=>b.week_total-a.week_total||a.key.localeCompare(b.key))};
     fs.writeFileSync(path.join(this.dataDir,'calibration.json'),JSON.stringify(report,null,2));
     return this.calibrationCache;
   }
@@ -561,9 +827,11 @@ class Collector {
     if (!this.sessions.has(id)) return {type:'detail',id,error:'会话不存在'};
     this.historicalCommands(id);
     const snap = this.snapshot();
+    const models = this.modelCatalog().models;
     return {type:'detail',id,session:snap.sessions.find(s=>s.id===id),
       commands:this.db.prepare('SELECT * FROM commands WHERE thread_id=? ORDER BY start_ms DESC LIMIT 300').all(id),
-      models:this.db.prepare('SELECT model,effort,tier,SUM(total) total,SUM(input-cached) uncached,SUM(cached) cached,SUM(output) output,SUM(reasoning) reasoning,COUNT(*) requests FROM usage WHERE thread_id=? GROUP BY model,effort,tier ORDER BY total DESC,model,effort,tier').all(id).map(r=>({...r,key:groupKey(r)})),
+      models:this.db.prepare("SELECT model,effort,tier,SUM(total) total,SUM(input-cached) uncached,SUM(cached) cached,SUM(output) output,SUM(reasoning) reasoning,SUM(kind='response') requests FROM usage WHERE thread_id=? GROUP BY model,effort,tier ORDER BY total DESC,model,effort,tier").all(id)
+        .filter(row => models.has(row.model)).map(row => ({ ...row, key: groupKey(row) })),
       daily:this.db.prepare("SELECT strftime('%Y-%m-%d',at_ms/1000,'unixepoch','+8 hours') day,SUM(total) total FROM usage WHERE thread_id=? GROUP BY day ORDER BY day DESC LIMIT 60").all(id),
       edges:snap.edges.filter(e=>e.parent_id===id||e.child_id===id),
       processes:this.processes.filter(p=>p.thread_id===id)};
@@ -571,16 +839,23 @@ class Collector {
   async sampleProcesses() {
     if (process.platform !== 'win32') { this.processError='进程采样仅支持 Windows'; return; }
     if (this.sampling) return;
+    if (!this.processSampler) { this.processAt=Date.now();this.processError='未提供进程采样器';return; }
     this.sampling = true;
-    const script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Select-Object @{n='pid';e={$_.ProcessId}},@{n='ppid';e={$_.ParentProcessId}},@{n='name';e={$_.Name}},@{n='created';e={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}},@{n='memory';e={[double]$_.WorkingSetSize}},@{n='cpu';e={([double]$_.KernelModeTime+[double]$_.UserModeTime)/10000000}},@{n='command';e={$_.CommandLine}}) | ConvertTo-Json -Compress";
+    const script = path.extname(this.processSampler).toLowerCase() === '.ps1';
+    const executable = script
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      : this.processSampler;
+    const args = script
+      ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', this.processSampler]
+      : ['sample-processes'];
     try {
       const rows = await new Promise((resolve,reject) => {
-        const child=spawn(path.join(process.env.SystemRoot || 'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+        const child=spawn(executable,args,{windowsHide:true,stdio:['ignore','pipe','pipe']});
         let data='',error='';const timer=setTimeout(()=>{child.kill();reject(new Error('进程采样超时'));},12000);
         child.stdout.on('data',d=>{data+=d;if(data.length>8*1024*1024){child.kill();reject(new Error('进程列表过大'));}});
         child.stderr.on('data',d=>{error+=d;});
         child.on('error',e=>{clearTimeout(timer);reject(e);});
-        child.on('close',code=>{clearTimeout(timer);if(code!==0)reject(new Error(error.trim().slice(0,180)||'进程采样失败'));else{const value=parse(data.replace(/^\uFEFF/,''),[]);resolve(Array.isArray(value)?value:[value]);}});
+        child.on('close',code=>{clearTimeout(timer);if(code!==0)reject(new Error(error.trim().slice(0,180)||'进程采样失败'));else{try{const value=JSON.parse(data.replace(/^\uFEFF/,''));if(!Array.isArray(value))throw new Error('进程采样格式错误');resolve(value);}catch(e){reject(e);}}});
       });
       this.processes=flattenProcesses(rows,new Set(this.sessions.keys()),process.pid);
       this.processAt=Date.now();this.processError=null;
@@ -613,19 +888,32 @@ class CollectorService {
   constructor(collector,send,interval=30,feedOptions={}){
     this.collector=collector;this.send=send;this.stopped=false;
     this.error=error=>{if(!this.stopped)this.send({type:'error',message:error.message});};
+    let publishedQuota = null;
+    const publish = snapshot => {
+      publishedQuota = snapshot.quota;
+      send(snapshot);
+    };
     this.queue=new RefreshQueue(async batch=>{
       const started=Date.now();
       for(const ack of batch.acknowledgements)collector.activity.acknowledge(ack.id,ack.turn_id);
       if(batch.full){
         await collector.scan({snapshot:false});if(this.stopped)return;
-        send(collector.snapshot());
+        publish(collector.snapshot());
         // Process enumeration is independent of session delivery, including slow CIM calls.
         if(!collector.sampling&&(batch.manual||Date.now()-collector.processAt>=15000)){
           void collector.sampleProcesses().then(()=>{if(!this.stopped)send({type:'processes',processes:collector.processes,process_at:collector.processAt,process_error:collector.processError});}).catch(this.error);
         }
       }else{
         const message=await collector.scanActivity(batch);if(this.stopped)return;
-        message.sync={mode:'local-watch',observed_at:batch.observed_at||started,published_at:Date.now()};send(message);
+        const quota = this.loop.seconds > 0 && batch.files.size ? collector.latestQuota(message.at) : null;
+        const changed = quota && (!publishedQuota || quota.used_percent !== publishedQuota.used_percent
+          || quota.scope !== publishedQuota.scope || quota.plan !== publishedQuota.plan
+          || quota.conflict !== publishedQuota.conflict || Math.abs(quota.reset_at - publishedQuota.reset_at) > 120);
+        if (changed) publish(collector.snapshot(message.at, message.speed));
+        else {
+          message.sync={mode:'local-watch',observed_at:batch.observed_at||started,published_at:Date.now()};
+          send(message);
+        }
       }
       if(collector.selected&&(batch.full||batch.detail))send(collector.detail(collector.selected));
     });
@@ -642,7 +930,7 @@ class CollectorService {
 }
 async function main() {
   const arg = name => { const i=process.argv.indexOf(name);return i>=0?process.argv[i+1]:undefined; };
-  const collector=new Collector({home:arg('--home'),dataDir:arg('--data')});
+  const collector=new Collector({home:arg('--home'),dataDir:arg('--data'),processSampler:arg('--process-sampler')});
   if (process.argv.includes('--once')) { await collector.scan(); await collector.sampleProcesses();process.stdout.write(JSON.stringify(collector.snapshot())+'\n');collector.close();return; }
   let closing=false;
   const send=o=>{if(!closing)process.stdout.write(JSON.stringify(o)+'\n');};

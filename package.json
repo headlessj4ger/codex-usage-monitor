@@ -1,6 +1,6 @@
 {
   "name": "codex-usage-monitor",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Windows tray and Acrylic mini monitor for local Codex tokens, sessions, rates and quota estimates",
   "license": "MIT",
   "author": "headlessj4ger",
