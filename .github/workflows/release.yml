@@ -36,10 +36,11 @@ jobs:
           if($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -cne $tag){throw 'Tag and package versions differ'}
           $zip="outputs/CodexUsageMonitor-$version-win-x64.zip"
           $tgz="outputs/codex-usage-monitor-$version.tgz"
-          $existing=gh release view $tag --repo $env:GITHUB_REPOSITORY --json isDraft,assets 2>$null
-          if($LASTEXITCODE -eq 0){
-            $release=$existing|ConvertFrom-Json
-            if($release.isDraft){throw 'An unpublished draft exists; inspect its assets before retrying'}
+          $published=gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | {tag_name, draft, assets}'
+          if($LASTEXITCODE -ne 0){throw 'Release lookup failed'}
+          $release=$published|ForEach-Object {$_|ConvertFrom-Json}|Where-Object {$_.tag_name -ceq $tag}|Select-Object -First 1
+          if($release){
+            if($release.draft){throw 'An unpublished draft exists; inspect its assets before retrying'}
             foreach($name in @("CodexUsageMonitor-$version-win-x64.zip","CodexUsageMonitor-$version-win-x64.sha256","codex-usage-monitor-$version.tgz","codex-usage-monitor-$version.tgz.sha256")){
               if(-not ($release.assets|Where-Object {$_.name -ceq $name -and $_.state -eq 'uploaded'})){throw ('Existing release is missing an asset: '+$name)}
             }
